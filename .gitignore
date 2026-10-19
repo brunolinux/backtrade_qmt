@@ -1,0 +1,21 @@
+# uv / python
+.venv
+.env
+__pycache__
+
+# editor
+.vscode
+
+# data
+*.csv
+*.zip
+doc
+
+# build artifacts
+dist/
+build/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
