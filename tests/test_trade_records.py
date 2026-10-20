@@ -1,4 +1,5 @@
 import ast
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -55,29 +56,31 @@ class TradeRecordsTest(unittest.TestCase):
                                    (8.0, -200.0, "止损"),
                                    (10.0, 0.0, "止损")]:
             with self.subTest(price=price):
-                records = strategy.update_trades(
+                records = strategy.calc_trade_records(
                     self.market(price), self.exit_time, {},
                     {"ETF_A": self.position()},
                 )
                 self.assert_trade(records, pnl, reason)
 
     def test_rebalance_preserves_existing_full_position_pnl(self):
-        new_pos = {"ETF_A": self.position(
-            qty=200, entry=12.0, entry_time=self.exit_time,
-        )}
-        records = strategy.update_trades(
-            self.market(12.0), self.exit_time, new_pos,
-            {"ETF_A": self.position()},
-        )
-        self.assert_trade(records, 200.0, "切换仓位")
-        self.assertEqual(new_pos["ETF_A"]["qty"], 200)
-        self.assertEqual(new_pos["ETF_A"]["entry_time"], self.exit_time)
+        for qty in [200, 50]:
+            with self.subTest(qty=qty):
+                new_pos = {"ETF_A": self.position(
+                    qty=qty, entry=12.0, entry_time=self.exit_time,
+                )}
+                records = strategy.calc_trade_records(
+                    self.market(12.0), self.exit_time, new_pos,
+                    {"ETF_A": self.position()},
+                )
+                self.assert_trade(records, 200.0, "切换仓位")
+                self.assertEqual(new_pos["ETF_A"]["qty"], qty)
+                self.assertEqual(new_pos["ETF_A"]["entry_time"], self.exit_time)
 
     def test_same_day_and_zero_quantity_close_do_not_generate_trades(self):
         for position in [self.position(entry_time=self.exit_time),
                          self.position(qty=0)]:
             with self.subTest(position=position):
-                self.assertEqual(strategy.update_trades(
+                self.assertEqual(strategy.calc_trade_records(
                     self.market(12.0), self.exit_time, {}, {"ETF_A": position},
                 ), [])
 
@@ -89,7 +92,7 @@ class TradeRecordsTest(unittest.TestCase):
             )),
         ]:
             with self.subTest(old_position=old_position):
-                self.assertEqual(strategy.update_trades(
+                self.assertEqual(strategy.calc_trade_records(
                     self.market(12.0), self.exit_time,
                     {"ETF_A": new_position}, {"ETF_A": old_position},
                 ), [])
@@ -97,14 +100,33 @@ class TradeRecordsTest(unittest.TestCase):
     def test_unchanged_quantity_restores_original_entry_information(self):
         original = self.position()
         new_pos = {"ETF_A": self.position(entry=12.0, entry_time=self.exit_time)}
-        records = strategy.update_trades(
-            self.market(12.0), self.exit_time, new_pos, {"ETF_A": original},
+        candidate = deepcopy(new_pos)
+        normalized = strategy.normalize_positions(new_pos, {"ETF_A": original})
+        records = strategy.calc_trade_records(
+            self.market(12.0), self.exit_time, normalized, {"ETF_A": original},
         )
         self.assertEqual(records, [])
-        self.assertEqual(new_pos["ETF_A"], original)
+        self.assertEqual(normalized["ETF_A"], original)
+        self.assertEqual(new_pos, candidate)
+
+    def test_record_calculation_preserves_all_inputs_and_is_repeatable(self):
+        market = self.market(12.0)
+        original_market = deepcopy(market)
+        old_pos = {"ETF_A": self.position()}
+        original_old = deepcopy(old_pos)
+        for new_pos in [{}, {"ETF_A": self.position(entry=12.0, entry_time=self.exit_time)},
+                        {"ETF_A": self.position(qty=200, entry=12.0, entry_time=self.exit_time)}]:
+            with self.subTest(new_pos=new_pos):
+                original_new = deepcopy(new_pos)
+                first = strategy.calc_trade_records(market, self.exit_time, new_pos, old_pos)
+                second = strategy.calc_trade_records(market, self.exit_time, new_pos, old_pos)
+                self.assertEqual(first, second)
+                self.assertEqual(new_pos, original_new)
+                self.assertEqual(old_pos, original_old)
+                pd.testing.assert_frame_equal(market['ETF_A'], original_market['ETF_A'])
 
     def test_both_backtests_preserve_empty_and_nonempty_trade_tables(self):
-        records = strategy.update_trades(
+        records = strategy.calc_trade_records(
             self.market(12.0), self.exit_time, {}, {"ETF_A": self.position()},
         )
         baseline = [("ETF_A", 1, self.entry_time, self.exit_time, 200.0, "止盈")]
@@ -127,7 +149,7 @@ class TradeRecordsTest(unittest.TestCase):
                     pd.testing.assert_frame_equal(scope["trades"], expected)
 
     def test_csv_export_matches_ordinary_tuple_baseline(self):
-        records = strategy.update_trades(
+        records = strategy.calc_trade_records(
             self.market(12.0), self.exit_time, {}, {"ETF_A": self.position()},
         )
         path = PROJECT_ROOT / "backtest_etf_v2.py"

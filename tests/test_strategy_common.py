@@ -90,11 +90,24 @@ class PortfolioBaselineTest(unittest.TestCase):
         market = self.market()
         original_market = deepcopy(market)
         positions = {'A': self.position(), 'SUSPENDED': self.position()}
-        self.module.update_stop_price(market, positions, self.time, 2.)
-        self.assertEqual(positions, {'A': self.position(stop=10.),
-                                     'SUSPENDED': self.position()})
-        self.module.update_stop_price(market, positions, self.time, 4.)
-        self.assertEqual(positions['A']['stop'], 10.)
+        original_positions = deepcopy(positions)
+        old_record = positions['A']
+        updated = self.module.calc_stop_positions(market, positions, self.time, 2.)
+        self.assertEqual(updated, {'A': self.position(stop=10.),
+                                   'SUSPENDED': self.position()})
+        self.assertEqual(positions, original_positions)
+        self.assertEqual(old_record, self.position())
+        repeated = self.module.calc_stop_positions(market, positions, self.time, 2.)
+        self.assertEqual(updated, repeated)
+        lower_stop = self.module.calc_stop_positions(market, updated, self.time, 4.)
+        self.assertEqual(lower_stop['A']['stop'], 10.)
+        updated['A']['stop'] = 999.
+        updated['SUSPENDED']['qty'] = 0
+        self.assertEqual(positions, original_positions)
+        empty = {}
+        result = self.module.calc_stop_positions({}, empty, self.time, 2.)
+        self.assertEqual(result, {})
+        self.assertIsNot(result, empty)
         for sym in market:
             assert_frame_equal(market[sym], original_market[sym])
 
@@ -103,7 +116,7 @@ class PortfolioBaselineTest(unittest.TestCase):
         original_market = deepcopy(market)
         positions = {'A': self.position(), 'SUSPENDED': self.position()}
         original = deepcopy(positions)
-        updated = self.module.update_portfolio(market, positions, self.time, 6000., .2)
+        updated = self.module.rebalance_portfolio(market, positions, self.time, 6000., .2)
         self.assertEqual(updated, {
             'A': self.position(qty=200, entry=12., entry_time=self.time),
             'SUSPENDED': self.position(),
@@ -111,27 +124,33 @@ class PortfolioBaselineTest(unittest.TestCase):
         self.assertEqual(positions, original)
         for sym in market:
             assert_frame_equal(market[sym], original_market[sym])
-        unchanged = self.module.update_portfolio(market, {'A': self.position()}, self.time, 1440., .2)
+        updated['A']['qty'] = 999
+        updated['SUSPENDED']['stop'] = 999.
+        self.assertEqual(positions, original)
+        unchanged = self.module.rebalance_portfolio(market, {'A': self.position()}, self.time, 1440., .2)
         self.assertEqual(unchanged, {'A': self.position(entry=12., entry_time=self.time)})
-        self.assertEqual(self.module.update_portfolio({}, {}, self.time, 1000., .2), {})
+        self.assertEqual(self.module.rebalance_portfolio({}, {}, self.time, 1000., .2), {})
 
-    def test_trade_records_and_unchanged_quantity_side_effect(self):
+    def test_trade_records_and_unchanged_quantity_normalization(self):
         market = self.market()
         old = {'A': self.position()}
         original = deepcopy(old)
-        records = self.module.update_trades(market, self.time, {}, old)
+        records = self.module.calc_trade_records(market, self.time, {}, old)
         self.assertEqual(records, [('A', 1, self.entry_time, self.time, 200., '止盈')])
         self.assertIsInstance(records[0], self.module.Trade)
         new = {'A': self.position(entry=12., entry_time=self.time)}
-        self.assertEqual(self.module.update_trades(market, self.time, new, old), [])
-        self.assertEqual(new, original)
+        candidate = deepcopy(new)
+        self.assertEqual(self.module.calc_trade_records(market, self.time, new, old), [])
+        normalized = self.module.normalize_positions(new, old)
+        self.assertEqual(normalized, original)
+        self.assertEqual(new, candidate)
         self.assertEqual(old, original)
 
     def test_portfolio_info_preserves_rows_cash_and_inputs(self):
         market = self.market()
         positions = {'A': self.position(), 'SUSPENDED': self.position()}
         original = deepcopy(positions)
-        rows = self.module.update_portfolio_info(market, positions, self.time, 2000.)
+        rows = self.module.build_portfolio_snapshot(market, positions, self.time, 2000.)
         self.assertEqual(rows, [(self.time, 'A', 100, 1200.),
                                 (self.time, 'SUSPENDED', 0, 0),
                                 (self.time, 'UNHELD', 0, 0),
@@ -150,7 +169,7 @@ class SharedCompatibilityTest(unittest.TestCase):
         old = {'A': dict(qty=100, side=1, entry=10., entry_time=entry_time)}
         for module in (legacy, strategy_momentum_v2):
             with self.subTest(module=module.__name__):
-                record, = module.update_trades(market, time, {}, old)
+                record, = module.calc_trade_records(market, time, {}, old)
                 self.assertIsInstance(record, strategy_common.Trade)
                 self.assertEqual((record.symbol, record.pnl, record.exit_reason),
                                  ('A', 200., '止盈'))

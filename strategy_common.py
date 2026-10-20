@@ -1,6 +1,6 @@
 """两个动量策略共用的行情、指标、风险、持仓和交易记录工具。
 
-本模块不依赖策略或记账模块；函数保留原有数值语义及持仓更新边界。
+本模块不依赖策略或记账模块；函数仅读取输入，新状态通过返回值提供。
 策略专有的信号、选股规则和回测编排由各策略自身维护。
 """
 
@@ -122,15 +122,16 @@ class Trade(NamedTuple):
     exit_reason: str         # 卖出原因
 
 
-def update_stop_price(df_all: dict, pos: dict, time, atr_stop):
+def calc_stop_positions(df_all: dict, pos: dict, time, atr_stop):
     """
-    动态移动止损：价格上升时提高止损
+    返回逐记录复制的新持仓，价格上升时提高止损，不修改任何输入。
     df_all: 多品种字典
-    pos: 仓位字典 (会更新)
+    pos: 原仓位字典（只读，包括停牌标的记录）
     time: 当前时刻
     atr_stop: 回撤倍数
     """
-    for sym, p in pos.items():
+    next_pos = {sym: p.copy() for sym, p in pos.items()}
+    for sym, p in next_pos.items():
         df = df_all[sym]
         if time not in df.index:
             continue
@@ -139,8 +140,10 @@ def update_stop_price(df_all: dict, pos: dict, time, atr_stop):
         new_stop = c - atr_stop * p["atr"]
         p["stop"] = max(p["stop"], new_stop)
 
+    return next_pos
 
-def update_portfolio(df_all: dict, pos: dict, time, real_equity, pos_change_threshold):
+
+def rebalance_portfolio(df_all: dict, pos: dict, time, real_equity, pos_change_threshold):
     """
     调整仓位
     df_all: 多品种字典
@@ -226,10 +229,26 @@ def update_portfolio(df_all: dict, pos: dict, time, real_equity, pos_change_thre
     return out_pos
 
 
-def update_trades(df_all:dict, time, new_pos: dict, old_pos: dict) -> list[Trade]:
+def normalize_positions(new_pos: dict, old_pos: dict) -> dict:
+    """返回修正入场信息的新持仓，不修改新旧输入或其中的记录。
+
+    同标的入场时间不同但数量相同时，沿用旧 entry_time 和 entry；
+    入场时间相同、数量变化或新建标的保留候选值，不计算交易记录。
     """
-    根据仓位调整返回交易记录列表，不修改 old_pos。
-    数量不变时会将 new_pos 的入场时间和价格恢复为原值。
+    normalized = {sym: p.copy() for sym, p in new_pos.items()}
+    for sym in new_pos.keys() & old_pos.keys():
+        if new_pos[sym]["entry_time"] == old_pos[sym]["entry_time"]:
+            continue
+        if new_pos[sym]["qty"] == old_pos[sym]["qty"]:
+            normalized[sym]["entry_time"] = old_pos[sym]["entry_time"]
+            normalized[sym]["entry"] = old_pos[sym]["entry"]
+    return normalized
+
+
+def calc_trade_records(df_all:dict, time, new_pos: dict, old_pos: dict) -> list[Trade]:
+    """
+    根据新旧持仓返回交易记录列表，不修改行情或任一持仓输入。
+    数量不变时不生成记录；入场信息修正由 normalize_positions 单独返回。
     """
     trades: list[Trade] = []
     old_sym = set(old_pos.keys())
@@ -269,10 +288,8 @@ def update_trades(df_all:dict, time, new_pos: dict, old_pos: dict) -> list[Trade
         if new_pos[sym]["entry_time"] == old_pos[sym]["entry_time"]:
             continue
 
-        # 如果仓位相同，则更新新的时间为老的时间
+        # 如果仓位相同，则不生成交易记录
         if new_pos[sym]["qty"] == old_pos[sym]["qty"]:
-            new_pos[sym]["entry_time"] = old_pos[sym]["entry_time"]
-            new_pos[sym]["entry"] = old_pos[sym]["entry"]
             continue
 
         if old_pos[sym]["qty"] == 0:
@@ -295,7 +312,7 @@ def update_trades(df_all:dict, time, new_pos: dict, old_pos: dict) -> list[Trade
     return trades
 
 
-def update_portfolio_info(df_all: dict, pos: dict, time, equity):
+def build_portfolio_snapshot(df_all: dict, pos: dict, time, equity):
     """
     返回当日各标的及现金的仓位记录，不修改持仓或行情。
     保留原规则：无当日行情或未持有标的输出零仓位。

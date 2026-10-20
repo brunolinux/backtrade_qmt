@@ -1,10 +1,11 @@
 import pandas as pd
 import numpy as np
-from portfolio_accounting import update_equity_close
+from portfolio_accounting import calc_equity_close
 from strategy_common import (
     Trade, getv, atr, calc_corr_matrix, calc_quantity, calc_position_size,
-    calc_leverage_by_vol, update_stop_price, update_portfolio, update_trades,
-    update_portfolio_info,
+    calc_leverage_by_vol, calc_stop_positions, rebalance_portfolio, calc_trade_records,
+    normalize_positions,
+    build_portfolio_snapshot,
 )
 
 
@@ -29,15 +30,16 @@ def check_correlation_constraint(sym, pos_dict: dict, corr_matrix, threshold):
 
 def preprocess(df_all: dict, atr_window, extreme_window, avg_window):
     """
-    预处理函数
+    返回包含指标的独立行情字典，不修改输入字典或 DataFrame。
     df_all: 多品种数据字典
     atr_window: ATR 指标计算窗口
     extreme_window: 历史极值数据计算窗口
     avg_window: 均值数据计算窗口
     """
+    processed_data = {}
     for sym, df in df_all.items():
         df = df.sort_index()
-        df = df[~df.index.duplicated(keep="last")]
+        df = df[~df.index.duplicated(keep="last")].copy(deep=True)
         
         # 计算技术指标
         df["atr"] = atr(df, atr_window)
@@ -50,12 +52,14 @@ def preprocess(df_all: dict, atr_window, extreme_window, avg_window):
         df["sig_long"] = ((df["close"] > df["hh"]) & (df["close"] > df["ma"]))
         df["sig_short"] = ((df["close"] < df["ll"]) &  (df["close"] < df["ma"]))
         
-        df_all[sym] = df
+        processed_data[sym] = df
+
+    return processed_data
 
 
-def update_reserve_pos(df_all: dict, pos: dict, time):
+def select_retained_positions(df_all: dict, pos: dict, time):
     """
-    判断每个品种的价格是否超过阈值, 否则保留
+    返回继续持有的独立仓位记录，保留原筛选规则，不修改输入。
     df_all: 多品种字典
     pos: 仓位字典
     time: 当前时刻
@@ -129,7 +133,7 @@ def calc_buy_signals(df_all: dict, pos: dict, corr_matrix, time, corr_threshold)
 def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_risk_per_trade):
     """
     按信号强度排序，只选择最强的几个信号
-    signals: 信号
+    signals: 信号（只读，按强度排序后计算新持仓）
     time: 当前时刻
     equity: 当前市值
     num_candidate: 候选品种数目
@@ -138,12 +142,12 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
     max_risk_per_trade: 每笔交易的最大允许损失
     """
     # 
-    signals.sort(key=lambda x: x[2], reverse=True)
+    sorted_signals = sorted(signals, key=lambda x: x[2], reverse=True)
 
     pos = {}
     prev_close = {}
 
-    for i, (sym, side, strength, px, a) in enumerate(signals):
+    for i, (sym, side, strength, px, a) in enumerate(sorted_signals):
         if i >= num_candidate:
             break
 
@@ -172,7 +176,7 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
 
 def backtest(df_all: dict, params: dict, start_date=None):
     """
-    回撤
+    返回持仓、权益及交易表，不修改调用方的行情字典、DataFrame 或参数。
     df_all: 多品种数据字典
     params: 参数
     start_date: 起始日期
@@ -186,7 +190,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
     curve = []
 
     # 预处理
-    preprocess(df_all, params["window_atr"], params["window_extreme"], 
+    df_all = preprocess(df_all, params["window_atr"], params["window_extreme"],
                params["window_avg"])
     print("预处理计算")
 
@@ -204,18 +208,19 @@ def backtest(df_all: dict, params: dict, start_date=None):
             continue
 
         # 更新盯市收益 & 收盘价信息
-        equity = update_equity_close(df_all, pos, prev_close, t, equity)
+        equity, prev_close = calc_equity_close(df_all, pos, prev_close, t, equity)
         equity_hist.append(equity)
 
         # 更新仓位信息中的止损价格
-        update_stop_price(df_all, pos, t, params["atr_drawdown"])
+        pos = calc_stop_positions(df_all, pos, t, params["atr_drawdown"])
 
         for sym, p in pos.items():
             print("{} close: {:.3f} stop: {:.3f}, take: {:.3f}".format(sym, p["entry"], p["stop"], p["take"]))
 
         # 更新保留仓位, 卖出部分仓位
-        reserve_pos = update_reserve_pos(df_all, pos, t)
-        trades.extend(update_trades(df_all, t, reserve_pos, pos))
+        reserve_pos = select_retained_positions(df_all, pos, t)
+        reserve_pos = normalize_positions(reserve_pos, pos)
+        trades.extend(calc_trade_records(df_all, t, reserve_pos, pos))
         pos = reserve_pos
 
         # 计算每个品种的买入信号
@@ -244,13 +249,14 @@ def backtest(df_all: dict, params: dict, start_date=None):
             real_equity = equity * lev
 
             # 调整仓位 (考虑整个资产组合)
-            cur_pos = update_portfolio(df_all, pos, t, real_equity, params["pos_change_threshold"])
-            trades.extend(update_trades(df_all, t, cur_pos, pos))
+            cur_pos = rebalance_portfolio(df_all, pos, t, real_equity, params["pos_change_threshold"])
+            cur_pos = normalize_positions(cur_pos, pos)
+            trades.extend(calc_trade_records(df_all, t, cur_pos, pos))
             pos = cur_pos
 
 
         # 更新每个标的的仓位信息, 如果没有买入，则为0
-        cur_portfolio = update_portfolio_info(df_all, pos, t, equity)
+        cur_portfolio = build_portfolio_snapshot(df_all, pos, t, equity)
         df_portfolio.extend(cur_portfolio)
         curve.append((t, equity))
         print("{} over!!!!".format(t))

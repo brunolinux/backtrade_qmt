@@ -1,23 +1,25 @@
 import pandas as pd
 import numpy as np
-from portfolio_accounting import update_equity_close
+from portfolio_accounting import calc_equity_close
 from strategy_common import (getv, atr, calc_corr_matrix,
-    calc_quantity, update_stop_price,
-    update_trades, calc_position_size, calc_leverage_by_vol, 
-    update_portfolio, update_portfolio_info)
+    calc_quantity, calc_stop_positions,
+    calc_trade_records, normalize_positions, calc_position_size, calc_leverage_by_vol,
+    rebalance_portfolio, build_portfolio_snapshot)
 
 
 def preprocess(df_all: dict, atr_window, short_window, long_window, vol_window):
     """
-    预处理函数
+    返回包含指标的独立行情字典，不修改输入字典或 DataFrame。
     df_all: 多品种数据字典
     atr_window: ATR 指标计算窗口
-    extreme_window: 历史极值数据计算窗口
-    avg_window: 均值数据计算窗口
+    short_window: 短周期动量窗口
+    long_window: 长周期动量窗口
+    vol_window: 波动率窗口
     """
+    processed_data = {}
     for sym, df in df_all.items():
         df = df.sort_index()
-        df = df[~df.index.duplicated(keep="last")]
+        df = df[~df.index.duplicated(keep="last")].copy(deep=True)
         
         df["atr"] = atr(df, atr_window)
 
@@ -27,7 +29,9 @@ def preprocess(df_all: dict, atr_window, short_window, long_window, vol_window):
         vol = df["close"].pct_change().rolling(vol_window).std()
         factor = (mom_short*0.7 + mom_long*0.3)/vol
         df["factor"] = factor
-        df_all[sym] = df
+        processed_data[sym] = df
+
+    return processed_data
 
 
 def rank_factor(df_all: dict, time, col_name="factor"):
@@ -43,9 +47,9 @@ def rank_factor(df_all: dict, time, col_name="factor"):
     return sorted_factor
 
 
-def update_reserve_pos(df_all: dict, pos: dict, sorted_factor, time, top_num_reserve):
+def select_retained_positions(df_all: dict, pos: dict, sorted_factor, time, top_num_reserve):
     """
-    更新保留仓位
+    返回继续持有的独立仓位记录，保留原筛选规则，不修改输入。
     df_all: 多品种字典
     pos: 现有仓位字典
     sorted_factor: 截面排序因子
@@ -127,7 +131,7 @@ def calc_buy_pos(df_all: dict, old_pos: dict, sorted_factor: pd.Series, time,
 
 def backtest(df_all: dict, params: dict, start_date=None):
     """
-    回撤
+    返回持仓、权益及交易表，不修改调用方的行情字典、DataFrame 或参数。
     df_all: 多品种数据字典
     params: 参数
     start_date: 起始日期
@@ -141,7 +145,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
     curve = []
 
     # 预处理
-    preprocess(df_all, params["window_atr"], params["window_short"], 
+    df_all = preprocess(df_all, params["window_atr"], params["window_short"],
                params["window_long"], params["window_vol"])
     print("预处理计算")
 
@@ -156,19 +160,20 @@ def backtest(df_all: dict, params: dict, start_date=None):
             continue
 
         # 更新盯市收益 & 收盘价信息
-        equity = update_equity_close(df_all, pos, prev_close, t, equity)
+        equity, prev_close = calc_equity_close(df_all, pos, prev_close, t, equity)
         equity_hist.append(equity)
  
         # 更新仓位信息中的止损价格
-        update_stop_price(df_all, pos, t, params["atr_stop"])
+        pos = calc_stop_positions(df_all, pos, t, params["atr_stop"])
 
         # 对截面因子排序
         sorted_factor = rank_factor(df_all, t, "factor")
 
         # 计算保留品种
-        reserve_pos = update_reserve_pos(df_all, pos, sorted_factor, t, params["top_num_reserve"])
+        reserve_pos = select_retained_positions(df_all, pos, sorted_factor, t, params["top_num_reserve"])
         # 更新卖出品种
-        trades.extend(update_trades(df_all, t, reserve_pos, pos))
+        reserve_pos = normalize_positions(reserve_pos, pos)
+        trades.extend(calc_trade_records(df_all, t, reserve_pos, pos))
         pos = reserve_pos
 
         # 计算候选品种数目
@@ -192,13 +197,14 @@ def backtest(df_all: dict, params: dict, start_date=None):
             real_equity = equity * lev
 
             # 调整仓位 (考虑整个资产组合)
-            cur_pos = update_portfolio(df_all, pos, t, real_equity, params["pos_change_threshold"])
-            trades.extend(update_trades(df_all, t, cur_pos, pos))
+            cur_pos = rebalance_portfolio(df_all, pos, t, real_equity, params["pos_change_threshold"])
+            cur_pos = normalize_positions(cur_pos, pos)
+            trades.extend(calc_trade_records(df_all, t, cur_pos, pos))
             pos = cur_pos
 
 
         # 更新每个标的的仓位信息, 如果没有买入，则为0
-        cur_portfolio = update_portfolio_info(df_all, pos, t, equity)
+        cur_portfolio = build_portfolio_snapshot(df_all, pos, t, equity)
         df_portfolio.extend(cur_portfolio)
         curve.append((t, equity))
         print("{} over!!!!".format(t))

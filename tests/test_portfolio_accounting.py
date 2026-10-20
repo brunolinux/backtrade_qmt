@@ -10,8 +10,10 @@ import strategy_momentum as strategy
 import strategy_momentum_v2 as strategy_v2
 
 
-class LegacySettlementTest(unittest.TestCase):
-    settle = staticmethod(strategy.update_equity_close)
+class StrategySettlementTest(unittest.TestCase):
+    @staticmethod
+    def settle(*args, **kwargs):
+        return strategy.calc_equity_close(*args, **kwargs)
 
     def setUp(self):
         self.time = pd.Timestamp('2026-01-06')
@@ -20,61 +22,70 @@ class LegacySettlementTest(unittest.TestCase):
         return {sym: pd.DataFrame({'close': [price]}, index=[self.time])
                 for sym, price in prices.items()}
 
+    def assert_settlement(self, market, positions, marks, time, prev_equity,
+                          expected_equity, expected_marks):
+        original_marks = marks.copy()
+        original_positions = deepcopy(positions)
+        original_market = deepcopy(market)
+        for _ in range(2):
+            equity, next_close = self.settle(market, positions, marks, time, prev_equity)
+            self.assertEqual(equity, expected_equity)
+            self.assertEqual(next_close, expected_marks)
+            self.assertIsNot(next_close, marks)
+            self.assertEqual(marks, original_marks)
+            self.assertEqual(positions, original_positions)
+            for sym in market:
+                assert_frame_equal(market[sym], original_market[sym])
+        next_close['OUTPUT_ONLY'] = 999.
+        self.assertEqual(marks, original_marks)
+
     def test_gains_and_losses_preserve_holdings_and_market(self):
         market = self.market(A=11., B=18., UNHELD=999.)
         positions = {'A': {'qty': 100}, 'B': {'qty': 50}}
         marks = {'A': 10., 'B': 20., 'STALE': 7.}
         old_positions = deepcopy(positions)
         old_market = {sym: df.copy(deep=True) for sym, df in market.items()}
-        self.assertEqual(self.settle(market, positions, marks, self.time, 1000.), 1000.)
-        self.assertEqual(marks, {'A': 11., 'B': 18., 'STALE': 7.})
+        self.assert_settlement(market, positions, marks, self.time, 1000., 1000.,
+                               {'A': 11., 'B': 18., 'STALE': 7.})
         self.assertEqual(positions, old_positions)
         for sym in market:
             assert_frame_equal(market[sym], old_market[sym])
 
     def test_empty_positions_leave_equity_and_marks_unchanged(self):
         marks = {'STALE': 7.}
-        self.assertEqual(self.settle({}, {}, marks, self.time, 1000.), 1000.)
-        self.assertEqual(marks, {'STALE': 7.})
+        self.assert_settlement({}, {}, marks, self.time, 1000., 1000., {'STALE': 7.})
 
     def test_signed_and_zero_quantities(self):
         marks = {'A': 10., 'B': 20.}
-        equity = self.settle(self.market(A=11., B=18.),
-                             {'A': {'qty': 0}, 'B': {'qty': -50}},
-                             marks, self.time, 1000.)
-        self.assertEqual(equity, 1100.)
-        self.assertEqual(marks, {'A': 11., 'B': 18.})
+        self.assert_settlement(self.market(A=11., B=18.),
+                               {'A': {'qty': 0}, 'B': {'qty': -50}},
+                               marks, self.time, 1000., 1100., {'A': 11., 'B': 18.})
 
     def test_missing_mark_initializes_without_profit(self):
         marks = {}
-        self.assertEqual(self.settle(self.market(A=11.), {'A': {'qty': 100}},
-                                     marks, self.time, 1000.), 1000.)
-        self.assertEqual(marks, {'A': 11.})
+        self.assert_settlement(self.market(A=11.), {'A': {'qty': 100}},
+                               marks, self.time, 1000., 1000., {'A': 11.})
 
     def test_suspension_preserves_mark_until_resumption(self):
         market = {'A': pd.DataFrame({'close': [12.]}, index=[self.time + pd.Timedelta(days=1)])}
         marks = {'A': 10.}
         positions = {'A': {'qty': 100}}
-        equity = self.settle(market, positions, marks, self.time, 1000.)
-        self.assertEqual(equity, 1000.)
-        self.assertEqual(marks, {'A': 10.})
-        equity = self.settle(market, positions, marks, self.time + pd.Timedelta(days=1), equity)
-        self.assertEqual(equity, 1200.)
-        self.assertEqual(marks, {'A': 12.})
+        self.assert_settlement(market, positions, marks, self.time, 1000., 1000., {'A': 10.})
+        self.assert_settlement(market, positions, marks, self.time + pd.Timedelta(days=1),
+                               1000., 1200., {'A': 12.})
 
 
-class SettlementTest(LegacySettlementTest):
+class SettlementTest(StrategySettlementTest):
     @staticmethod
     def settle(*args, **kwargs):
-        from portfolio_accounting import update_equity_close
-        return update_equity_close(*args, **kwargs)
+        from portfolio_accounting import calc_equity_close
+        return calc_equity_close(*args, **kwargs)
 
     def test_duplicate_dates_use_last_price(self):
         market = {'A': pd.DataFrame({'close': [11., 12.]}, index=[self.time, self.time])}
         marks = {'A': 10.}
-        self.assertEqual(self.settle(market, {'A': {'qty': 100}}, marks,
-                                     self.time, 1000.), 1200.)
-        self.assertEqual(marks, {'A': 12.})
+        self.assert_settlement(market, {'A': {'qty': 100}}, marks,
+                               self.time, 1000., 1200., {'A': 12.})
 
     def test_invalid_or_missing_close_propagates_nan(self):
         for frame in [pd.DataFrame({'other': [11.]}, index=[self.time]),
@@ -82,10 +93,11 @@ class SettlementTest(LegacySettlementTest):
                       pd.DataFrame({'close': [float('nan')]}, index=[self.time])]:
             with self.subTest(frame=frame):
                 marks = {'A': 10.}
-                equity = self.settle({'A': frame}, {'A': {'qty': 100}}, marks,
-                                     self.time, 1000.)
+                equity, next_close = self.settle({'A': frame}, {'A': {'qty': 100}}, marks,
+                                                 self.time, 1000.)
                 self.assertTrue(pd.isna(equity))
-                self.assertTrue(pd.isna(marks['A']))
+                self.assertTrue(pd.isna(next_close['A']))
+                self.assertEqual(marks, {'A': 10.})
 
     def test_calculation_and_marks_share_one_price_read(self):
         class ChangingQuote:
@@ -99,10 +111,11 @@ class SettlementTest(LegacySettlementTest):
                 return self.price
 
         marks = {'A': 10.}
-        equity = self.settle({'A': ChangingQuote(self.time)}, {'A': {'qty': 100}},
-                             marks, self.time, 1000.)
+        equity, next_close = self.settle({'A': ChangingQuote(self.time)}, {'A': {'qty': 100}},
+                                         marks, self.time, 1000.)
         self.assertEqual(equity, 1100.)
-        self.assertEqual(marks, {'A': 11.})
+        self.assertEqual(next_close, {'A': 11.})
+        self.assertEqual(marks, {'A': 10.})
 
 
 class AccountingCoreTest(unittest.TestCase):
@@ -126,20 +139,35 @@ class AccountingCoreTest(unittest.TestCase):
             {'A': 0, 'B': -50}, {'A': 11., 'B': 18.},
             {'A': 10., 'B': 20.}, 1000.), 1100.)
 
-    def test_mark_update_preserves_other_keys_and_price_snapshot(self):
-        from portfolio_accounting import update_close_marks
+    def test_mark_builder_preserves_other_keys_and_both_inputs(self):
+        from portfolio_accounting import build_close_marks
 
         current = {'A': 11., 'NEW': 15.}
         marks = {'A': 10., 'STALE': 7.}
-        update_close_marks(current, marks)
-        self.assertEqual(marks, {'A': 11., 'NEW': 15., 'STALE': 7.})
+        result = build_close_marks(current, marks)
+        self.assertEqual(result, {'A': 11., 'NEW': 15., 'STALE': 7.})
+        self.assertEqual(marks, {'A': 10., 'STALE': 7.})
         self.assertEqual(current, {'A': 11., 'NEW': 15.})
-        update_close_marks({}, marks)
-        self.assertEqual(marks, {'A': 11., 'NEW': 15., 'STALE': 7.})
+        result['A'] = 999.
+        self.assertEqual(marks, {'A': 10., 'STALE': 7.})
+        self.assertEqual(current, {'A': 11., 'NEW': 15.})
+        empty_result = build_close_marks({}, marks)
+        self.assertEqual(empty_result, marks)
+        self.assertIsNot(empty_result, marks)
 
 
 class BacktestAccountingTest(unittest.TestCase):
     def test_v2_open_mark_and_close_match_fixed_baseline(self):
+        self.assert_backtest_baseline(strategy_v2, hold_max_num=1)
+
+    def test_old_strategy_rebalance_and_close_match_fixed_baseline(self):
+        # 空余名额使每天都尝试调仓；股数不变时需保留首次入场价。
+        self.assert_backtest_baseline(strategy, hold_max_num=2)
+
+    def test_v2_unchanged_quantity_preserves_entry_until_close(self):
+        self.assert_backtest_baseline(strategy_v2, hold_max_num=2)
+
+    def assert_backtest_baseline(self, module, hold_max_num):
         dates = pd.date_range('2026-01-05', periods=6)
         prices = [10., 11., 13., 14., 12., 11.]
         market = {'A': pd.DataFrame({
@@ -148,12 +176,27 @@ class BacktestAccountingTest(unittest.TestCase):
         }, index=dates)}
         params = dict(
             init_equity=10000, window_atr=2, window_short=1, window_long=2,
-            window_vol=2, atr_stop=1, top_num_reserve=1, hold_max_num=1,
+            window_vol=2, atr_stop=1, top_num_reserve=1, hold_max_num=hold_max_num,
             max_risk_per_trade=1., annual_factor=252, target_vol=.3,
             min_lev=1., max_lev=1., pos_change_threshold=.2,
+            window_extreme=2, window_avg=2, atr_drawdown=1, atr_take=10,
+            corr_threshold=.9,
         )
+        original_market = deepcopy(market)
+        original_frames = market.copy()
+        original_params = deepcopy(params)
+        results = []
         with redirect_stdout(StringIO()):
-            portfolio, curve, trades = strategy_v2.backtest(market, params)
+            for _ in range(2):
+                results.append(module.backtest(market, params))
+                self.assertEqual(params, original_params)
+                self.assertEqual(list(market), list(original_market))
+                for sym in market:
+                    self.assertIs(market[sym], original_frames[sym])
+                    assert_frame_equal(market[sym], original_market[sym])
+        portfolio, curve, trades = results[0]
+        for first, second in zip(results[0], results[1]):
+            assert_frame_equal(first, second)
 
         # 第三天以 13 元买入 700 股，现金 900；第六天以 11 元平仓。
         expected_portfolio = pd.DataFrame({
