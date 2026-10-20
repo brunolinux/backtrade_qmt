@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
-from strategy_momentum import (getv, atr, calc_corr_matrix, 
-    calc_quantity, update_equity_close, update_stop_price, 
+from portfolio_accounting import update_equity_close
+from strategy_common import (getv, atr, calc_corr_matrix,
+    calc_quantity, update_stop_price,
     update_trades, calc_position_size, calc_leverage_by_vol, 
     update_portfolio, update_portfolio_info)
 
