@@ -7,19 +7,25 @@ from strategy_common import (Position, Trade, getv, atr, calc_corr_matrix,
     rebalance_portfolio, build_portfolio_snapshot)
 
 
-def preprocess(market_data: dict, atr_window, short_window, long_window, volatility_window):
+def preprocess(
+        market_data: dict[str, pd.DataFrame],
+        atr_window: int,
+        short_window: int,
+        long_window: int,
+        volatility_window: int,
+        ) -> dict[str, pd.DataFrame]:
     """整理行情并计算 ATR 和波动率调整后的动量因子。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 high、low、
             close 数值列；输入字典及 DataFrame 只读。
-        atr_window: int，ATR 滚动均值的行数窗口。
-        short_window: int，短周期动量收益率的间隔行数。
-        long_window: int，长周期动量收益率的间隔行数。
-        volatility_window: int，单期收益率滚动标准差的行数窗口。
+        atr_window: ATR 滚动均值的行数窗口。
+        short_window: 短周期动量收益率的间隔行数。
+        long_window: 长周期动量收益率的间隔行数。
+        volatility_window: 单期收益率滚动标准差的行数窗口。
 
     Returns:
-        dict，包含独立 DataFrame 的新行情字典。每张表按索引排序，重复索引
+        包含独立 DataFrame 的新行情字典。每张表按索引排序，重复索引
         保留最后一条，并添加 atr 和 factor 列；因子为短、长动量按 0.7、0.3
         加权后除以波动率。窗口未满的指标保留 NaN。
     """
@@ -27,7 +33,7 @@ def preprocess(market_data: dict, atr_window, short_window, long_window, volatil
     for sym, df in market_data.items():
         df = df.sort_index()
         df = df[~df.index.duplicated(keep="last")].copy(deep=True)
-        
+
         df["atr"] = atr(df, atr_window)
 
         # 计算技术指标
@@ -41,17 +47,21 @@ def preprocess(market_data: dict, atr_window, short_window, long_window, volatil
     return processed_data
 
 
-def rank_factor(market_data: dict, timestamp, factor_column="factor"):
+def rank_factor(
+        market_data: dict,
+        timestamp,
+        factor_column="factor",
+        ) -> pd.Series:
     """按指定时刻的截面因子降序排列标的。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，输入只读；
             当日索引应唯一，且存在指定的因子列。
         timestamp: 与行情索引兼容的排名时刻。
-        factor_column: str，用于排名的因子列名，默认为 factor。
+        factor_column: 用于排名的因子列名，默认为 factor。
 
     Returns:
-        pandas.Series，索引为标的代码，值为因子，按因子降序排列。
+        索引为标的代码，值为因子，按因子降序排列。
         无当日行情或当日因子为 NaN 的标的不参与排名。
     """
     factor = {}
@@ -63,7 +73,13 @@ def rank_factor(market_data: dict, timestamp, factor_column="factor"):
     return sorted_factor
 
 
-def select_retained_positions(market_data: dict, positions: dict[str, Position], ranked_factors, timestamp, retention_rank_limit) -> dict[str, Position]:
+def select_retained_positions(
+        market_data: dict[str, pd.DataFrame],
+        positions: dict[str, Position],
+        ranked_factors: pd.Series,
+        timestamp,
+        retention_rank_limit: int
+        ) -> dict[str, Position]:
     """筛选收盘价高于止损价且排名在保留范围内的持仓。
 
     Args:
@@ -85,6 +101,7 @@ def select_retained_positions(market_data: dict, positions: dict[str, Position],
     # 遍历所有仓位
     for sym in positions.keys():
         df = market_data[sym]
+
         # 如果当天不能交易, 则保留仓位
         if timestamp not in df.index:
             reserve_pos[sym] = positions[sym]
@@ -93,28 +110,36 @@ def select_retained_positions(market_data: dict, positions: dict[str, Position],
         c = getv(df, timestamp, "close")
         p = positions[sym]
 
-        rank_index = ranked_factors.index.get_loc(sym)
-        # 如果没有达到止盈线 或者 排序仍然靠前
+        rank_index = ranked_factors.index.get_indexer([sym])[0]
+        # 如果没有达到止损线 或者 排序仍然靠前
         if c > p.stop and rank_index < retention_rank_limit:
             reserve_pos[sym] = positions[sym]
 
     return reserve_pos
 
 
-def calc_buy_pos(market_data: dict, held_positions: dict[str, Position], ranked_factors: pd.Series, timestamp,
-                 equity, candidate_limit, stop_atr_multiple, max_trade_risk_ratio) -> tuple[dict[str, Position], dict[str, float]]:
+def calc_buy_pos(
+        market_data: dict,
+        held_positions: dict[str, Position],
+        ranked_factors: pd.Series,
+        timestamp,
+        equity : float,
+        candidate_limit: int,
+        stop_atr_multiple: float,
+        max_trade_risk_ratio: float,
+        ) -> tuple[dict[str, Position], dict[str, float]]:
     """扫描排名靠前的候选标的并计算新开仓记录。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 和
             atr 列；扫描标的应具有当日有效行情。
         held_positions: 已持有标的的 Position 仓位字典，用于跳过已有持仓。
-        ranked_factors: pandas.Series，按因子降序排列，索引为标的代码。
+        ranked_factors: 按因子降序排列, 索引为标的代码。
         timestamp: 与行情索引兼容的开仓时刻。
-        equity: float，账户总权益，用于计算单笔风险预算和持仓金额上限。
-        candidate_limit: int，最多扫描的排名项数；已有持仓也占用扫描名额。
-        stop_atr_multiple: float，止损距离相对当日 ATR 的倍数。
-        max_trade_risk_ratio: float，单笔允许损失占权益的比例，如 0.02。
+        equity: 账户总权益，用于计算单笔风险预算和持仓金额上限。
+        candidate_limit: 最多扫描的排名项数; 已有持仓也占用扫描名额。
+        stop_atr_multiple: 止损距离相对当日 ATR 的倍数。
+        max_trade_risk_ratio: 单笔允许损失占权益的比例, 如 0.02。
 
     Returns:
         tuple[dict[str, Position], dict[str, float]]，即 (positions, prev_close)，
@@ -130,36 +155,41 @@ def calc_buy_pos(market_data: dict, held_positions: dict[str, Position], ranked_
         # 超过候选数目
         if i >= candidate_limit:
             break
-        
+
         # 得分小于 0
         if ranked_factors[sym] < 0:
             break
-        
+
         # 已经包含在已有仓位
         if sym in held_positions.keys():
             continue
 
         df = market_data[sym]
 
-        px = getv(df, timestamp, "close")
-        a = getv(df, timestamp, "atr")
+        price = getv(df, timestamp, "close")
+        atr = getv(df, timestamp, "atr")
 
-        stop = px - stop_atr_multiple * a
+        stop = price - stop_atr_multiple * atr
 
         # 计算仓位
-        qty = calc_position_size(equity, a, px, stop_atr_multiple, max_trade_risk_ratio)
+        qty = calc_position_size(equity, atr, price, stop_atr_multiple, max_trade_risk_ratio)
 
         pos[sym] = Position(
-            entry=px, entry_time=timestamp, stop=stop, atr=a, qty=qty, side=1)
-        prev_close[sym] = px
+            entry=price, entry_time=timestamp, stop=stop, atr=atr, qty=qty, side=1)
+        prev_close[sym] = price
 
     return pos, prev_close
 
 
 def _calc_daily_positions(
-        market_data: dict, positions: dict[str, Position], close_marks: dict[str, float],
-        timestamp, equity, equity_history, params: dict
-) -> tuple[dict[str, Position], dict[str, float], list[Trade]]:
+        market_data: dict,
+        positions: dict[str, Position],
+        close_marks: dict[str, float],
+        timestamp,
+        equity,
+        equity_history,
+        params: dict
+    ) -> tuple[dict[str, Position], dict[str, float], list[Trade]]:
     """计算当日止损、持仓筛选及条件开仓和调仓后的新状态。
 
     Args:

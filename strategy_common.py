@@ -93,15 +93,21 @@ def calc_corr_matrix(market_data: dict, price_column: str = "close") -> pd.DataF
     return corr
 
 
-def calc_position_size(equity, atr_value, price, stop_atr_multiple, max_trade_risk_ratio):
+def calc_position_size(
+        equity: float,
+        atr_value: float,
+        price: float,
+        stop_atr_multiple: float,
+        max_trade_risk_ratio: float
+        ) -> int:
     """根据单笔风险预算和总权益上限计算开仓股数。
 
     Args:
-        equity: float，账户总权益，用于风险预算和持仓金额上限。
-        atr_value: float，与每股价格处于同一尺度的 ATR。
-        price: float，标的每股价格。
-        stop_atr_multiple: float，止损距离相对 ATR 的倍数。
-        max_trade_risk_ratio: float，单笔风险占权益的比例，例如 0.02。
+        equity: 账户总权益，用于风险预算和持仓金额上限。
+        atr_value: 与每股价格处于同一尺度的 ATR。
+        price: 标的每股价格。
+        stop_atr_multiple: 止损距离相对 ATR 的倍数。
+        max_trade_risk_ratio: 单笔风险占权益的比例, 例如 0.02。
 
     Returns:
         int，按 100 股向零取整且不超过权益金额上限的开仓股数。
@@ -124,16 +130,23 @@ def calc_position_size(equity, atr_value, price, stop_atr_multiple, max_trade_ri
     return shares
 
 
-def calc_leverage_by_vol(equity_history, volatility_window, periods_per_year, target_annual_volatility, min_leverage, max_leverage):
+def calc_leverage_by_vol(
+        equity_history: list[float],
+        volatility_window: int,
+        periods_per_year: int,
+        target_annual_volatility: float,
+        min_leverage: float,
+        max_leverage: float
+        ) -> float:
     """根据权益曲线的年化波动率计算目标杠杆。
 
     Args:
         equity_history: 正数权益组成的序列，按时间先后排列，输入只读。
-        volatility_window: int，用于估计波动率的最近权益观测数量。
-        periods_per_year: float，每年周期数，日频通常为 252。
-        target_annual_volatility: float，目标年化波动率，例如 0.3。
-        min_leverage: float，样本充足时允许的杠杆下限。
-        max_leverage: float，样本充足时允许的杠杆上限。
+        volatility_window: 用于估计波动率的最近权益观测数量。
+        periods_per_year: 每年周期数，日频通常为 252。
+        target_annual_volatility: 目标年化波动率，例如 0.3。
+        min_leverage: 样本充足时允许的杠杆下限。
+        max_leverage: 样本充足时允许的杠杆上限。
 
     Returns:
         float，按上下限裁剪的波动率目标杠杆。权益观测数量不足窗口时
@@ -185,7 +198,12 @@ class Trade(NamedTuple):
     exit_reason: str         # 卖出原因
 
 
-def calc_stop_positions(market_data: dict, positions: dict[str, Position], timestamp, stop_atr_multiple) -> dict[str, Position]:
+def calc_stop_positions(
+        market_data: dict,
+        positions: dict[str, Position],
+        timestamp,
+        stop_atr_multiple
+        ) -> dict[str, Position]:
     """根据当日收盘价提高持仓止损价。
 
     Args:
@@ -211,7 +229,13 @@ def calc_stop_positions(market_data: dict, positions: dict[str, Position], times
     return next_pos
 
 
-def rebalance_portfolio(market_data: dict, positions: dict[str, Position], timestamp, allocation_budget, quantity_change_threshold_ratio) -> dict[str, Position]:
+def rebalance_portfolio(
+        market_data: dict,
+        positions: dict[str, Position],
+        timestamp,
+        allocation_budget,
+        quantity_change_threshold_ratio
+        ) -> dict[str, Position]:
     """按 ATR 倒数分配预算并调整持仓股数。
 
     Args:
@@ -305,7 +329,10 @@ def rebalance_portfolio(market_data: dict, positions: dict[str, Position], times
     return out_pos
 
 
-def normalize_positions(candidate_positions: dict[str, Position], current_positions: dict[str, Position]) -> dict[str, Position]:
+def normalize_positions(
+        candidate_positions: dict[str, Position],
+        current_positions: dict[str, Position]
+        ) -> dict[str, Position]:
     """为股数未变的候选持仓恢复原入场信息。
 
     Args:

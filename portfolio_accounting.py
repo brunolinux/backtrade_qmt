@@ -46,7 +46,13 @@ def build_close_marks(
     return {**prev_close, **current_close}
 
 
-def calc_equity_close(market_data: dict, positions: dict[str, Position], prev_close: dict, timestamp, prev_equity):
+def calc_equity_close(
+        market_data: dict,
+        positions: dict[str, Position],
+        prev_close: dict,
+        timestamp,
+        prev_equity
+        ):
     """用同一份收盘价快照计算权益和下一次估值基准。
 
     Args:
