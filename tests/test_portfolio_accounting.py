@@ -187,8 +187,12 @@ class BacktestAccountingTest(unittest.TestCase):
         original_params = deepcopy(params)
         results = []
         with redirect_stdout(StringIO()):
-            for _ in range(2):
-                results.append(module.backtest(market, params))
+            for run_index in range(2):
+                if module is strategy_v2 and run_index == 1:
+                    results.append(module.backtest(
+                        market_data=market, params=params, start_date=dates[0]))
+                else:
+                    results.append(module.backtest(market, params))
                 self.assertEqual(params, original_params)
                 self.assertEqual(list(market), list(original_market))
                 for sym in market:
