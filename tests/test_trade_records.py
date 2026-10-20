@@ -7,6 +7,7 @@ import unittest
 import pandas as pd
 
 import strategy_momentum as strategy
+from strategy_common import Position
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ class TradeRecordsTest(unittest.TestCase):
             "side": 1,
         }
         position.update(changes)
-        return position
+        return Position(**position)
 
     def market(self, price):
         return {"ETF_A": pd.DataFrame({"close": [price]}, index=[self.exit_time])}
@@ -73,8 +74,8 @@ class TradeRecordsTest(unittest.TestCase):
                     {"ETF_A": self.position()},
                 )
                 self.assert_trade(records, 200.0, "切换仓位")
-                self.assertEqual(new_pos["ETF_A"]["qty"], qty)
-                self.assertEqual(new_pos["ETF_A"]["entry_time"], self.exit_time)
+                self.assertEqual(new_pos["ETF_A"].qty, qty)
+                self.assertEqual(new_pos["ETF_A"].entry_time, self.exit_time)
 
     def test_same_day_and_zero_quantity_close_do_not_generate_trades(self):
         for position in [self.position(entry_time=self.exit_time),

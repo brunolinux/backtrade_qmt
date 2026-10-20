@@ -5,6 +5,32 @@ import pandas as pd
 from pandas.testing import assert_frame_equal, assert_series_equal
 
 import strategy_momentum as legacy
+import strategy_common as common
+
+
+class PositionTest(unittest.TestCase):
+    def test_named_fields_and_optional_take(self):
+        position = common.Position(qty=100, side=1, entry=10.,
+                                   entry_time=pd.Timestamp('2026-01-05'), stop=9., atr=1.)
+        self.assertEqual(position.qty, 100)
+        self.assertIsNone(position.take)
+        self.assertEqual(position._fields,
+                         ('qty', 'side', 'entry', 'entry_time', 'stop', 'atr', 'take'))
+        with self.assertRaises(TypeError):
+            common.Position(qty=100)
+        with self.assertRaises(TypeError):
+            _ = position['qty']
+        with self.assertRaises(AttributeError):
+            position.stop = 12.
+
+    def test_replacement_preserves_original_and_all_other_fields(self):
+        original = common.Position(qty=-100, side=-1, entry=10.,
+                                   entry_time=pd.Timestamp('2026-01-05'),
+                                   stop=9., atr=1., take=15.)
+        changed = original._replace(stop=11.)
+        self.assertEqual(original.stop, 9.)
+        self.assertEqual(changed.stop, 11.)
+        self.assertEqual(changed._asdict(), dict(original._asdict(), stop=11.))
 
 
 class PriceRiskBaselineTest(unittest.TestCase):
@@ -77,7 +103,7 @@ class PortfolioBaselineTest(unittest.TestCase):
         result = dict(qty=100, side=1, entry=10., entry_time=self.entry_time,
                       stop=9., atr=1.)
         result.update(changes)
-        return result
+        return common.Position(**result)
 
     def market(self):
         return {
@@ -100,9 +126,10 @@ class PortfolioBaselineTest(unittest.TestCase):
         repeated = self.module.calc_stop_positions(market, positions, self.time, 2.)
         self.assertEqual(updated, repeated)
         lower_stop = self.module.calc_stop_positions(market, updated, self.time, 4.)
-        self.assertEqual(lower_stop['A']['stop'], 10.)
-        updated['A']['stop'] = 999.
-        updated['SUSPENDED']['qty'] = 0
+        self.assertEqual(lower_stop['A'].stop, 10.)
+        self.assertIsNot(updated, positions)
+        updated['A'] = updated['A']._replace(stop=999.)
+        updated['OUTPUT_ONLY'] = updated.pop('SUSPENDED')._replace(qty=0)
         self.assertEqual(positions, original_positions)
         empty = {}
         result = self.module.calc_stop_positions({}, empty, self.time, 2.)
@@ -111,7 +138,7 @@ class PortfolioBaselineTest(unittest.TestCase):
         for sym in market:
             assert_frame_equal(market[sym], original_market[sym])
 
-    def test_portfolio_rebalance_returns_copies_and_respects_threshold(self):
+    def test_portfolio_rebalance_returns_new_mapping_and_respects_threshold(self):
         market = self.market()
         original_market = deepcopy(market)
         positions = {'A': self.position(), 'SUSPENDED': self.position()}
@@ -124,12 +151,28 @@ class PortfolioBaselineTest(unittest.TestCase):
         self.assertEqual(positions, original)
         for sym in market:
             assert_frame_equal(market[sym], original_market[sym])
-        updated['A']['qty'] = 999
-        updated['SUSPENDED']['stop'] = 999.
+        self.assertIsNot(updated, positions)
+        updated['A'] = updated['A']._replace(qty=999)
+        updated['SUSPENDED'] = updated['SUSPENDED']._replace(stop=999.)
         self.assertEqual(positions, original)
         unchanged = self.module.rebalance_portfolio(market, {'A': self.position()}, self.time, 1440., .2)
         self.assertEqual(unchanged, {'A': self.position(entry=12., entry_time=self.time)})
         self.assertEqual(self.module.rebalance_portfolio({}, {}, self.time, 1000., .2), {})
+
+    def test_budget_shortage_clips_even_below_threshold_and_preserves_take(self):
+        original = {'A': self.position(take=15.)}
+        result = self.module.rebalance_portfolio(
+            self.market(), original, self.time, 600., 100.)
+        self.assertEqual(result, {})
+        result = self.module.rebalance_portfolio(
+            self.market(), original, self.time, 3000., .2)
+        self.assertEqual(result, {'A': self.position(
+            qty=200, entry=12., entry_time=self.time, take=15.)})
+        clipped = self.module.rebalance_portfolio(
+            self.market(), {'A': self.position(qty=200, take=15.)}, self.time, 1800., 100.)
+        self.assertEqual(clipped, {'A': self.position(
+            qty=100, entry=12., entry_time=self.time, take=15.)})
+        self.assertEqual(original, {'A': self.position(take=15.)})
 
     def test_trade_records_and_unchanged_quantity_normalization(self):
         market = self.market()
@@ -166,7 +209,8 @@ class SharedCompatibilityTest(unittest.TestCase):
         time = pd.Timestamp('2026-01-06')
         entry_time = pd.Timestamp('2026-01-05')
         market = {'A': pd.DataFrame({'close': [12.]}, index=[time])}
-        old = {'A': dict(qty=100, side=1, entry=10., entry_time=entry_time)}
+        old = {'A': common.Position(qty=100, side=1, entry=10., entry_time=entry_time,
+                                    stop=9., atr=1.)}
         for module in (legacy, strategy_momentum_v2):
             with self.subTest(module=module.__name__):
                 record, = module.calc_trade_records(market, time, {}, old)

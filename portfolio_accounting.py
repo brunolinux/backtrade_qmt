@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from strategy_common import getv
+from strategy_common import Position, getv
 
 
 def calc_mark_to_market_equity(
@@ -46,12 +46,12 @@ def build_close_marks(
     return {**prev_close, **current_close}
 
 
-def calc_equity_close(market_data: dict, positions: dict, prev_close: dict, timestamp, prev_equity):
+def calc_equity_close(market_data: dict, positions: dict[str, Position], prev_close: dict, timestamp, prev_equity):
     """用同一份收盘价快照计算权益和下一次估值基准。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
-        positions: 当前持仓字典，每条记录的 qty 为带符号股数。
+        positions: 当前 Position 持仓字典，每条记录的 qty 为带符号股数。
         prev_close: 上次每股估值价格字典，开仓基准由调用方按买入价初始化。
         timestamp: 与行情索引兼容的当前估值时刻。
         prev_equity: float，上次账户总权益；行情、持仓及旧基准输入只读。
@@ -67,7 +67,7 @@ def calc_equity_close(market_data: dict, positions: dict, prev_close: dict, time
     for sym, position in list(positions.items()):
         df = market_data[sym]
         if timestamp in df.index:
-            quantities[sym] = position['qty']
+            quantities[sym] = position.qty
             current_close[sym] = getv(df, timestamp, 'close')
 
     equity = calc_mark_to_market_equity(quantities, current_close, prev_close, prev_equity)

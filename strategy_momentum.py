@@ -2,18 +2,18 @@ import pandas as pd
 import numpy as np
 from portfolio_accounting import calc_equity_close
 from strategy_common import (
-    Trade, getv, atr, calc_corr_matrix, calc_quantity, calc_position_size,
+    Position, Trade, getv, atr, calc_corr_matrix, calc_quantity, calc_position_size,
     calc_leverage_by_vol, calc_stop_positions, rebalance_portfolio, calc_trade_records,
     normalize_positions,
     build_portfolio_snapshot,
 )
 
 
-def check_correlation_constraint(sym, pos_dict: dict, corr_matrix, threshold):
+def check_correlation_constraint(sym, pos_dict: dict[str, Position], corr_matrix, threshold):
     """
     判断给定品种是否与选中品种列表存在相关性
     sym: 给定品种
-    pos_dict: 选中品种以及品种仓位
+    pos_dict: 选中标的代码到不可变 Position 的映射
     corr_matrix: 品种相关矩阵
     threshold: 相关系数阈值
     """
@@ -57,11 +57,11 @@ def preprocess(df_all: dict, atr_window, extreme_window, avg_window):
     return processed_data
 
 
-def select_retained_positions(df_all: dict, pos: dict, time):
+def select_retained_positions(df_all: dict, pos: dict[str, Position], time) -> dict[str, Position]:
     """
-    返回继续持有的独立仓位记录，保留原筛选规则，不修改输入。
+    返回继续持有的新仓位字典，允许共享不可变记录，不修改输入。
     df_all: 多品种字典
-    pos: 仓位字典
+    pos: Position 仓位字典，take 必须为数值止盈价
     time: 当前时刻
     """
     reserve_pos = {}
@@ -70,26 +70,26 @@ def select_retained_positions(df_all: dict, pos: dict, time):
         df = df_all[sym]
         # 如果当天不能交易, 则保留仓位
         if time not in df.index:
-            reserve_pos[sym] = pos[sym].copy()
+            reserve_pos[sym] = pos[sym]
             continue
 
         c = getv(df, time, "close")
         p = pos[sym]
 
         # 止损或者止盈
-        if c <= p["stop"] or c >= p["take"]:  
+        if c <= p.stop or c >= p.take:
             continue
         else: # 保留仓位
-            reserve_pos[sym] = pos[sym].copy()
+            reserve_pos[sym] = pos[sym]
 
     return reserve_pos
 
 
-def calc_buy_signals(df_all: dict, pos: dict, corr_matrix, time, corr_threshold):
+def calc_buy_signals(df_all: dict, pos: dict[str, Position], corr_matrix, time, corr_threshold):
     """
     更新开仓信号
     df_all: 多品种字典
-    pos: 仓位字典
+    pos: 只读的 Position 仓位字典
     corr_matrix: 品种相关矩阵
     time: 当前时刻
     """
@@ -130,7 +130,7 @@ def calc_buy_signals(df_all: dict, pos: dict, corr_matrix, time, corr_threshold)
     return valid_signals
 
 
-def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_risk_per_trade):
+def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_risk_per_trade) -> tuple[dict[str, Position], dict[str, float]]:
     """
     按信号强度排序，只选择最强的几个信号
     signals: 信号（只读，按强度排序后计算新持仓）
@@ -140,11 +140,13 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
     atr_stop: 止损 atr 倍数
     atr_take: 止盈 atr 倍数
     max_risk_per_trade: 每笔交易的最大允许损失
+
+    返回 (positions, prev_close)：新 Position 持仓字典及每股买入价基准字典。
     """
     # 
     sorted_signals = sorted(signals, key=lambda x: x[2], reverse=True)
 
-    pos = {}
+    pos: dict[str, Position] = {}
     prev_close = {}
 
     for i, (sym, side, strength, px, a) in enumerate(sorted_signals):
@@ -160,15 +162,9 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
         if qty_abs <= 0:
             continue
 
-        pos[sym] = {
-            "side": side,
-            "entry": px,
-            "entry_time": time,
-            "stop": stop,
-            "take": take,
-            "atr": a,
-            "qty": qty_abs * side
-        }
+        pos[sym] = Position(
+            side=side, entry=px, entry_time=time, stop=stop, take=take,
+            atr=a, qty=qty_abs * side)
         prev_close[sym] = px
 
     return pos, prev_close
@@ -182,7 +178,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
     start_date: 起始日期
     """
     equity = float(params["init_equity"])
-    pos = {}
+    pos: dict[str, Position] = {}
     prev_close = {}
     trades = []
     equity_hist = []
@@ -215,7 +211,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
         pos = calc_stop_positions(df_all, pos, t, params["atr_drawdown"])
 
         for sym, p in pos.items():
-            print("{} close: {:.3f} stop: {:.3f}, take: {:.3f}".format(sym, p["entry"], p["stop"], p["take"]))
+            print("{} close: {:.3f} stop: {:.3f}, take: {:.3f}".format(sym, p.entry, p.stop, p.take))
 
         # 更新保留仓位, 卖出部分仓位
         reserve_pos = select_retained_positions(df_all, pos, t)

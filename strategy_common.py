@@ -152,6 +152,28 @@ def calc_leverage_by_vol(equity_history, volatility_window, periods_per_year, ta
     return vol_scale
 
 
+class Position(NamedTuple):
+    """不可变持仓记录，通过属性读取，以 _replace 创建字段变化后的新记录。
+
+    Attributes:
+        qty: 带符号的持仓股数。
+        side: 持仓方向。
+        entry: 每股入场价格。
+        entry_time: 入场时刻。
+        stop: 每股止损价格。
+        atr: 建仓时的 ATR。
+        take: 旧策略的每股止盈价格，v2 不使用，默认为 None。
+    """
+
+    qty: int
+    side: int
+    entry: float
+    entry_time: pd.Timestamp
+    stop: float
+    atr: float
+    take: float | None = None
+
+
 class Trade(NamedTuple):
     """已生成的交易记录，字段顺序与交易表一致。"""
 
@@ -163,37 +185,38 @@ class Trade(NamedTuple):
     exit_reason: str         # 卖出原因
 
 
-def calc_stop_positions(market_data: dict, positions: dict, timestamp, stop_atr_multiple):
+def calc_stop_positions(market_data: dict, positions: dict[str, Position], timestamp, stop_atr_multiple) -> dict[str, Position]:
     """根据当日收盘价提高持仓止损价。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
-        positions: 当前持仓字典，记录包含 stop 和入场时的 atr；输入只读。
+        positions: 当前 Position 持仓字典，使用 stop 和建仓时的 atr；输入只读。
         timestamp: 与行情索引兼容的当前时刻。
         stop_atr_multiple: float，止损距离相对持仓 atr 的倍数。
 
     Returns:
-        dict，逐记录复制的新持仓；止损只升不降，无当日行情的记录保持原值。
+        dict[str, Position]，新的外层持仓字典；止损只升不降，未变化的
+        不可变记录允许共享，无当日行情的记录保持原值。
     """
-    next_pos = {sym: p.copy() for sym, p in positions.items()}
+    next_pos = positions.copy()
     for sym, p in next_pos.items():
         df = market_data[sym]
         if timestamp not in df.index:
             continue
 
         c = getv(df, timestamp, "close")
-        new_stop = c - stop_atr_multiple * p["atr"]
-        p["stop"] = max(p["stop"], new_stop)
+        new_stop = c - stop_atr_multiple * p.atr
+        next_pos[sym] = p._replace(stop=max(p.stop, new_stop))
 
     return next_pos
 
 
-def rebalance_portfolio(market_data: dict, positions: dict, timestamp, allocation_budget, quantity_change_threshold_ratio):
+def rebalance_portfolio(market_data: dict, positions: dict[str, Position], timestamp, allocation_budget, quantity_change_threshold_ratio) -> dict[str, Position]:
     """按 ATR 倒数分配预算并调整持仓股数。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
-        positions: 当前持仓字典，记录包含 atr、qty、side、entry 和
+        positions: 当前 Position 持仓字典，使用 atr、qty、side、entry 和
             entry_time；行情及持仓输入只读。
         timestamp: 与行情索引兼容的调仓时刻。
         allocation_budget: float，可分配的持仓金额预算，通常为权益乘以杠杆。
@@ -201,19 +224,20 @@ def rebalance_portfolio(market_data: dict, positions: dict, timestamp, allocatio
             相对当前绝对股数的阈值；按 ATR 分配的目标调整仅在严格超过时执行。
 
     Returns:
-        dict，逐记录复制且去除零股数记录的新持仓。预算不足时还会裁减可交易
-        仓位，此阶段不受上述阈值限制。无当日行情的非零记录保留；可交易记录
+        dict[str, Position]，新的外层持仓字典，去除零股数记录；未变化的
+        不可变记录允许共享。预算不足时还会裁减可交易仓位，此阶段不受上述
+        阈值限制。无当日行情的非零记录保留；可交易记录
         的入场价和时间改为当日值，即使股数未变也会改写返回记录。
     """
     if len(positions) == 0:
         return {}
 
-    total_risk = sum(1.0 / p["atr"] for p in positions.values())
+    total_risk = sum(1.0 / p.atr for p in positions.values())
 
     # 在新的仓位上管理
     new_pos = {}
     for sym, p in positions.items():
-        new_pos[sym] = p.copy()
+        new_pos[sym] = p
         df = market_data[sym]
         if timestamp not in df.index:
             # 如果当天不能交易, 仓位不变
@@ -221,17 +245,16 @@ def rebalance_portfolio(market_data: dict, positions: dict, timestamp, allocatio
 
         px = getv(df, timestamp, "close")
 
-        risk_weight = (1.0/p["atr"])/total_risk
+        risk_weight = (1.0/p.atr)/total_risk
         target_notional = allocation_budget * risk_weight
         target_qty = calc_quantity(target_notional/px, 100)
 
         # 平滑调整仓位，避免频繁调仓
-        cur_qty = abs(p["qty"])
+        cur_qty = abs(p.qty)
         if abs(target_qty - cur_qty) > cur_qty*quantity_change_threshold_ratio:
-            new_pos[sym]["qty"] = target_qty * p["side"]
+            new_pos[sym] = new_pos[sym]._replace(qty=target_qty * p.side)
         # 更新时间
-        new_pos[sym]["entry_time"] = timestamp
-        new_pos[sym]["entry"] = px
+        new_pos[sym] = new_pos[sym]._replace(entry_time=timestamp, entry=px)
 
     # 获取股票总仓位 (只考虑可以交易的)
     unchanged_money = 0
@@ -242,10 +265,10 @@ def rebalance_portfolio(market_data: dict, positions: dict, timestamp, allocatio
         df = market_data[sym]
         if timestamp not in df.index:
             # 如果当天不能交易, 仓位不变
-            unchanged_money += p["qty"] * p["entry"]
+            unchanged_money += p.qty * p.entry
             unchanged_sym_list.append(sym)
         else:
-            money_list.append(p["qty"] * p["entry"])
+            money_list.append(p.qty * p.entry)
             sym_list.append(sym)
 
     money_list = np.array(money_list)
@@ -257,19 +280,19 @@ def rebalance_portfolio(market_data: dict, positions: dict, timestamp, allocatio
         new_new_pos = {}
         # 无法交易的直接拷贝过来
         for sym in unchanged_sym_list:
-            new_new_pos[sym] = new_pos[sym].copy()
+            new_new_pos[sym] = new_pos[sym]
 
         # 只考虑可以交易的
         idx_list = np.argsort(money_list)[::-1]
         for idx in idx_list:
             count += money_list[idx]
             sym = sym_list[idx]
-            new_new_pos[sym] = new_pos[sym].copy()
+            new_new_pos[sym] = new_pos[sym]
             if count > allocation_budget:
                 left = allocation_budget - (count - money_list[idx])
-                px = new_pos[sym]["entry"]
+                px = new_pos[sym].entry
                 qty = calc_quantity(left/px, 100)
-                new_new_pos[sym]["qty"] = qty
+                new_new_pos[sym] = new_new_pos[sym]._replace(qty=qty)
                 break
 
         new_pos = new_new_pos.copy()
@@ -277,40 +300,42 @@ def rebalance_portfolio(market_data: dict, positions: dict, timestamp, allocatio
     # 去除仓位为 0 的标的
     out_pos = {}
     for sym, p in new_pos.items():
-        if p["qty"] != 0:
-            out_pos[sym] = p.copy()
+        if p.qty != 0:
+            out_pos[sym] = p
     return out_pos
 
 
-def normalize_positions(candidate_positions: dict, current_positions: dict) -> dict:
+def normalize_positions(candidate_positions: dict[str, Position], current_positions: dict[str, Position]) -> dict[str, Position]:
     """为股数未变的候选持仓恢复原入场信息。
 
     Args:
-        candidate_positions: 候选持仓字典，记录包含 qty、entry_time 和 entry。
-        current_positions: 调仓前的当前持仓字典；两个输入及其中的记录只读。
+        candidate_positions: 候选 Position 持仓字典，使用 qty、entry_time 和 entry。
+        current_positions: 调仓前的 Position 持仓字典；两个输入及记录只读。
 
     Returns:
-        dict，逐记录复制的候选持仓。共有标的入场时间不同但股数相同时，
-        恢复当前持仓的 entry_time 和 entry；其余记录保留候选值。
+        dict[str, Position]，新的外层候选持仓字典。共有标的入场时间不同但
+        股数相同时，恢复当前持仓的 entry_time 和 entry，其他字段保留候选值；
+        未变化的不可变记录允许共享。
     """
-    normalized = {sym: p.copy() for sym, p in candidate_positions.items()}
+    normalized = candidate_positions.copy()
     for sym in candidate_positions.keys() & current_positions.keys():
-        if candidate_positions[sym]["entry_time"] == current_positions[sym]["entry_time"]:
+        if candidate_positions[sym].entry_time == current_positions[sym].entry_time:
             continue
-        if candidate_positions[sym]["qty"] == current_positions[sym]["qty"]:
-            normalized[sym]["entry_time"] = current_positions[sym]["entry_time"]
-            normalized[sym]["entry"] = current_positions[sym]["entry"]
+        if candidate_positions[sym].qty == current_positions[sym].qty:
+            normalized[sym] = candidate_positions[sym]._replace(
+                entry_time=current_positions[sym].entry_time,
+                entry=current_positions[sym].entry)
     return normalized
 
 
-def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict, current_positions: dict) -> list[Trade]:
+def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict[str, Position], current_positions: dict[str, Position]) -> list[Trade]:
     """根据持仓退出和股数变化计算交易记录。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
         timestamp: 与行情索引兼容的交易时刻。
-        candidate_positions: 调仓后的候选持仓字典。
-        current_positions: 调仓前的当前持仓字典，记录包含 qty、side、entry
+        candidate_positions: 调仓后的候选 Position 持仓字典。
+        current_positions: 调仓前的 Position 持仓字典，使用 qty、side、entry
             和 entry_time；行情及两个持仓输入只读。
 
     Returns:
@@ -330,21 +355,21 @@ def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict, c
     for sym in close_sym:
         p = current_positions[sym]
         # 如果时间相同, 则不用交易
-        if p["entry_time"] == timestamp:
+        if p.entry_time == timestamp:
             continue
 
         # 如果仓位为 0, 则不用交易
-        if p["qty"] == 0:
+        if p.qty == 0:
             continue
 
         df = market_data[sym]
         px = getv(df, timestamp, "close")
-        pnl = p["qty"] * (px - p["entry"])
+        pnl = p.qty * (px - p.entry)
         reason = "止盈" if pnl > 0 else "止损"
         trade_info = Trade(
             symbol=sym,
-            side=p["side"],
-            entry_time=p["entry_time"],
+            side=p.side,
+            entry_time=p.entry_time,
             exit_time=timestamp,
             pnl=float(pnl),
             exit_reason=reason,
@@ -354,24 +379,24 @@ def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict, c
     # 切换仓位
     for sym in common_sym:
         # 如果时间相同， 则跳过
-        if candidate_positions[sym]["entry_time"] == current_positions[sym]["entry_time"]:
+        if candidate_positions[sym].entry_time == current_positions[sym].entry_time:
             continue
 
         # 如果仓位相同，则不生成交易记录
-        if candidate_positions[sym]["qty"] == current_positions[sym]["qty"]:
+        if candidate_positions[sym].qty == current_positions[sym].qty:
             continue
 
-        if current_positions[sym]["qty"] == 0:
+        if current_positions[sym].qty == 0:
             continue
 
         df = market_data[sym]
         px = getv(df, timestamp, "close")
         p = current_positions[sym]
-        pnl = p["qty"] * (px - p["entry"])
+        pnl = p.qty * (px - p.entry)
         trade_info = Trade(
             symbol=sym,
-            side=p["side"],
-            entry_time=p["entry_time"],
+            side=p.side,
+            entry_time=p.entry_time,
             exit_time=timestamp,
             pnl=float(pnl),
             exit_reason="切换仓位",
@@ -381,12 +406,12 @@ def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict, c
     return trades
 
 
-def build_portfolio_snapshot(market_data: dict, positions: dict, timestamp, equity):
+def build_portfolio_snapshot(market_data: dict, positions: dict[str, Position], timestamp, equity):
     """构建当日各标的与现金的仓位快照。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
-        positions: 当前持仓字典，记录包含 qty；行情及持仓输入只读。
+        positions: 当前 Position 持仓字典，使用 qty；行情及持仓输入只读。
         timestamp: 与行情索引兼容的快照时刻。
         equity: float，当日账户总权益，用于扣除可估值持仓后计算现金。
 
@@ -406,8 +431,8 @@ def build_portfolio_snapshot(market_data: dict, positions: dict, timestamp, equi
             cur_port.append((timestamp, sym, 0, 0))
             continue
 
-        px = getv(df, timestamp, "close")  # pos[sym]["entry"]  #
-        qty = positions[sym]["qty"]
+        px = getv(df, timestamp, "close")
+        qty = positions[sym].qty
 
         value = px * qty
         cur_port.append((timestamp, sym, qty, value))

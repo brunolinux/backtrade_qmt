@@ -57,26 +57,26 @@ class PortfolioKeywordsTest(unittest.TestCase):
     def setUp(self):
         self.timestamp = pd.Timestamp('2026-01-06')
         self.entry_time = pd.Timestamp('2026-01-05')
-        self.position = dict(qty=100, side=1, entry=10., entry_time=self.entry_time,
-                             stop=9., atr=1.)
+        self.position = common.Position(qty=100, side=1, entry=10., entry_time=self.entry_time,
+                                        stop=9., atr=1.)
         self.market = {
             'A': pd.DataFrame({'close': [12.]}, index=[self.timestamp]),
             'B': pd.DataFrame({'close': [7.]}, index=[self.entry_time]),
         }
 
     def test_stop_allocation_budget_and_snapshot_keywords(self):
-        positions = {'A': self.position.copy(), 'B': self.position.copy()}
+        positions = {'A': self.position, 'B': self.position}
         original = deepcopy(positions)
         stops = common.calc_stop_positions(
             market_data=self.market, positions=positions, timestamp=self.timestamp,
             stop_atr_multiple=2.)
-        self.assertEqual(stops['A']['stop'], 10.)
+        self.assertEqual(stops['A'].stop, 10.)
         self.assertEqual(stops['B'], self.position)
         allocated = common.rebalance_portfolio(
             market_data=self.market, positions=positions, timestamp=self.timestamp,
             allocation_budget=6000., quantity_change_threshold_ratio=.2)
-        self.assertEqual(allocated['A']['qty'], 200)
-        self.assertEqual(allocated['A']['entry'], 12.)
+        self.assertEqual(allocated['A'].qty, 200)
+        self.assertEqual(allocated['A'].entry, 12.)
         self.assertEqual(allocated['B'], self.position)
         self.assertEqual(common.build_portfolio_snapshot(
             market_data=self.market, positions=positions, timestamp=self.timestamp,
@@ -86,8 +86,8 @@ class PortfolioKeywordsTest(unittest.TestCase):
         self.assertEqual(positions, original)
 
     def test_candidate_and_current_positions_keywords(self):
-        current = {'A': self.position.copy()}
-        candidates = {'A': dict(self.position, entry=12., entry_time=self.timestamp)}
+        current = {'A': self.position}
+        candidates = {'A': self.position._replace(entry=12., entry_time=self.timestamp)}
         original = deepcopy((current, candidates))
         normalized = common.normalize_positions(
             candidate_positions=candidates, current_positions=current)
@@ -95,7 +95,7 @@ class PortfolioKeywordsTest(unittest.TestCase):
         self.assertEqual(common.calc_trade_records(
             market_data=self.market, timestamp=self.timestamp,
             candidate_positions=normalized, current_positions=current), [])
-        changed = {'A': dict(candidates['A'], qty=200)}
+        changed = {'A': candidates['A']._replace(qty=200)}
         records = common.calc_trade_records(
             market_data=self.market, timestamp=self.timestamp,
             candidate_positions=changed, current_positions=current)
@@ -112,7 +112,9 @@ class AccountingKeywordsTest(unittest.TestCase):
             'B': pd.DataFrame({'close': [20.]}, index=[timestamp - pd.Timedelta(days=1)]),
             'C': pd.DataFrame({'close': [15.]}, index=[timestamp]),
         }
-        positions = {'A': {'qty': 100}, 'B': {'qty': 50}, 'C': {'qty': 100}}
+        positions = {symbol: common.Position(qty=quantity, side=1, entry=10.,
+                                             entry_time=timestamp, stop=9., atr=1.)
+                     for symbol, quantity in [('A', 100), ('B', 50), ('C', 100)]}
         previous = {'A': 10., 'B': 20., 'STALE': 7.}
         original = deepcopy((market, positions, previous))
         equity, marks = accounting.calc_equity_close(
@@ -172,37 +174,42 @@ class MomentumSelectionKeywordsTest(unittest.TestCase):
                                        ('C', 30., 3.), ('D', 40., 4.)]
         }
         self.ranks = pd.Series({'A': 3., 'B': 2., 'C': -1., 'D': -2.})
-        self.position = dict(qty=100, side=1, entry=10.,
-                             entry_time=self.timestamp - pd.Timedelta(days=1),
-                             stop=9., atr=1.)
+        self.position = common.Position(qty=100, side=1, entry=10.,
+                                        entry_time=self.timestamp - pd.Timedelta(days=1),
+                                        stop=9., atr=1.)
 
     def test_retention_rank_boundary_and_suspension(self):
         self.market['C'].index = [self.timestamp - pd.Timedelta(days=1)]
-        positions = {symbol: self.position.copy() for symbol in ['A', 'B', 'C']}
+        positions = {symbol: self.position for symbol in ['A', 'B', 'C']}
         original = deepcopy(positions)
         retained = momentum.select_retained_positions(
             market_data=self.market, positions=positions, ranked_factors=self.ranks,
             timestamp=self.timestamp, retention_rank_limit=1)
         self.assertEqual(set(retained), {'A', 'C'})
-        self.assertIsNot(retained['A'], positions['A'])
-        self.assertIsNot(retained['C'], positions['C'])
+        self.assertIsNot(retained, positions)
+        retained['A'] = retained['A']._replace(qty=999)
+        retained['OUTPUT_ONLY'] = retained.pop('C')
         self.assertEqual(positions, original)
-        positions['A']['stop'] = 10.
+        positions['A'] = positions['A']._replace(stop=10.)
         self.assertEqual(set(momentum.select_retained_positions(
             market_data=self.market, positions=positions, ranked_factors=self.ranks,
             timestamp=self.timestamp, retention_rank_limit=1)), {'C'})
 
     def test_held_symbol_consumes_candidate_limit_and_negative_factor_stops_scan(self):
-        held = {'A': self.position.copy()}
+        held = {'A': self.position}
         original = deepcopy((self.market, held, self.ranks))
         arguments = dict(market_data=self.market, held_positions=held,
                          ranked_factors=self.ranks, timestamp=self.timestamp,
                          equity=10000., stop_atr_multiple=2., max_trade_risk_ratio=.05)
         self.assertEqual(momentum.calc_buy_pos(**arguments, candidate_limit=1), ({}, {}))
-        expected = ({'B': dict(qty=100, side=1, entry=20., entry_time=self.timestamp,
-                              stop=16., atr=2.)}, {'B': 20.})
+        expected = ({'B': common.Position(qty=100, side=1, entry=20., entry_time=self.timestamp,
+                                         stop=16., atr=2.)}, {'B': 20.})
         self.assertEqual(momentum.calc_buy_pos(**arguments, candidate_limit=2), expected)
         self.assertEqual(momentum.calc_buy_pos(**arguments, candidate_limit=4), expected)
+        positions, marks = momentum.calc_buy_pos(**dict(arguments, equity=10.), candidate_limit=2)
+        self.assertEqual(positions, {'B': expected[0]['B']._replace(qty=0)})
+        self.assertIsNone(positions['B'].take)
+        self.assertEqual(marks, {'B': 20.})
         for symbol in self.market:
             assert_frame_equal(self.market[symbol], original[0][symbol])
         self.assertEqual(held, original[1])

@@ -54,23 +54,44 @@ class BuySignalInputsTest(unittest.TestCase):
         for _ in range(2):
             positions, marks = strategy.calc_buy_pos(signals, time, 10000., 1, 2., 3., .05)
             self.assertEqual(signals, original)
-            self.assertEqual(positions, {'STRONG': dict(
+            self.assertEqual(positions, {'STRONG': strategy_common.Position(
                 side=1, entry=20., entry_time=time, stop=18., take=23., atr=1., qty=200,
             )})
             self.assertEqual(marks, {'STRONG': 20.})
             results.append((positions, marks))
         self.assertEqual(results[0], results[1])
+        self.assertEqual(strategy.calc_buy_pos(signals, time, 10., 1, 2., 3., .05), ({}, {}))
+
+    def test_old_take_survives_state_transitions_and_still_exits_at_target(self):
+        entry_time = pd.Timestamp('2026-01-05')
+        timestamp = pd.Timestamp('2026-01-06')
+        positions, _ = strategy.calc_buy_pos(
+            [('A', 1, 1., 10., 1.)], entry_time, 10000., 1, 2., 5., .05)
+        self.assertIsInstance(positions['A'], strategy_common.Position)
+        self.assertEqual(positions['A'].take, 15.)
+        market = {'A': pd.DataFrame({'close': [12.]}, index=[timestamp])}
+        stopped = strategy.calc_stop_positions(market, positions, timestamp, 2.)
+        retained = strategy.select_retained_positions(market, stopped, timestamp)
+        allocated = strategy.rebalance_portfolio(market, retained, timestamp, 6000., .2)
+        normalized = strategy.normalize_positions(allocated, retained)
+        for result in (stopped, retained, allocated, normalized):
+            self.assertEqual(result['A'].take, 15.)
+            self.assertIsNot(result, positions)
+        self.assertEqual(positions['A'].stop, 8.)
+        market['A'].loc[timestamp, 'close'] = 15.
+        self.assertEqual(strategy.select_retained_positions(market, normalized, timestamp), {})
 
 
 class RetainedPositionsTest(unittest.TestCase):
-    def test_both_strategies_return_independent_retained_records(self):
+    def test_both_strategies_return_independent_retained_mappings(self):
         time = pd.Timestamp('2026-01-06')
         market = {
             'A': pd.DataFrame({'close': [12.]}, index=[time]),
             'B': pd.DataFrame({'close': [10.]}, index=[time - pd.Timedelta(days=1)]),
         }
-        positions = {sym: dict(qty=100, entry=10., entry_time=time - pd.Timedelta(days=1),
-                               stop=9., take=15., atr=1., side=1) for sym in market}
+        positions = {sym: strategy_common.Position(
+            qty=100, entry=10., entry_time=time - pd.Timedelta(days=1),
+            stop=9., take=15., atr=1., side=1) for sym in market}
         original = deepcopy(positions)
         original_market = deepcopy(market)
         for module in (strategy, strategy_v2):
@@ -81,26 +102,29 @@ class RetainedPositionsTest(unittest.TestCase):
                     ranks = pd.Series({'A': 2.})
                     result = module.select_retained_positions(market, positions, ranks, time, 1)
                 self.assertEqual(result, original)
-                result['A']['qty'] = 999
-                result['B']['stop'] = 999.
+                self.assertIsNot(result, positions)
+                result['A'] = result['A']._replace(qty=999)
+                result['OUTPUT_ONLY'] = result.pop('B')._replace(stop=999.)
                 self.assertEqual(positions, original)
                 for sym in market:
                     assert_frame_equal(market[sym], original_market[sym])
 
 
 class NormalizePositionsTest(unittest.TestCase):
-    def test_normalization_preserves_inputs_and_returns_detached_records(self):
+    def test_normalization_preserves_inputs_and_returns_new_mapping(self):
         old_time = pd.Timestamp('2026-01-05')
         new_time = pd.Timestamp('2026-01-06')
-        old_record = dict(qty=100, entry=10., entry_time=old_time)
+        old_record = strategy_common.Position(qty=100, side=1, entry=10.,
+                                             entry_time=old_time, stop=9., atr=1., take=15.)
         cases = [
-            ({'A': old_record}, dict(qty=100, entry=12., entry_time=new_time), old_record),
-            ({'A': old_record}, dict(qty=100, entry=12., entry_time=old_time),
-             dict(qty=100, entry=12., entry_time=old_time)),
-            ({'A': old_record}, dict(qty=200, entry=12., entry_time=new_time),
-             dict(qty=200, entry=12., entry_time=new_time)),
-            ({}, dict(qty=100, entry=12., entry_time=new_time),
-             dict(qty=100, entry=12., entry_time=new_time)),
+            ({'A': old_record}, old_record._replace(entry=12., entry_time=new_time), old_record),
+            ({'A': old_record}, old_record._replace(entry=12.), old_record._replace(entry=12.)),
+            ({'A': old_record}, old_record._replace(qty=200, entry=12., entry_time=new_time),
+             old_record._replace(qty=200, entry=12., entry_time=new_time)),
+            ({}, old_record._replace(entry=12., entry_time=new_time),
+             old_record._replace(entry=12., entry_time=new_time)),
+            ({'A': old_record}, old_record._replace(entry=12., entry_time=new_time, take=20.),
+             old_record._replace(take=20.)),
         ]
         for old, candidate, expected in cases:
             with self.subTest(old=old, candidate=candidate):
@@ -110,7 +134,8 @@ class NormalizePositionsTest(unittest.TestCase):
                 self.assertEqual(result, {'A': expected})
                 self.assertEqual((old, new), original)
                 self.assertEqual(strategy_common.normalize_positions(new, old), result)
-                result['A']['entry'] = 999.
+                self.assertIsNot(result, new)
+                result['OUTPUT_ONLY'] = result.pop('A')._replace(entry=999.)
                 self.assertEqual((old, new), original)
         new = {}
         result = strategy_common.normalize_positions(new, {'A': old_record})

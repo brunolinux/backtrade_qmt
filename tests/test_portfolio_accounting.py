@@ -8,6 +8,12 @@ from pandas.testing import assert_frame_equal
 
 import strategy_momentum as strategy
 import strategy_momentum_v2 as strategy_v2
+from strategy_common import Position
+
+
+def position(qty):
+    return Position(qty=qty, side=1, entry=10., entry_time=pd.Timestamp('2026-01-05'),
+                    stop=9., atr=1.)
 
 
 class StrategySettlementTest(unittest.TestCase):
@@ -41,7 +47,7 @@ class StrategySettlementTest(unittest.TestCase):
 
     def test_gains_and_losses_preserve_holdings_and_market(self):
         market = self.market(A=11., B=18., UNHELD=999.)
-        positions = {'A': {'qty': 100}, 'B': {'qty': 50}}
+        positions = {'A': position(100), 'B': position(50)}
         marks = {'A': 10., 'B': 20., 'STALE': 7.}
         old_positions = deepcopy(positions)
         old_market = {sym: df.copy(deep=True) for sym, df in market.items()}
@@ -58,18 +64,18 @@ class StrategySettlementTest(unittest.TestCase):
     def test_signed_and_zero_quantities(self):
         marks = {'A': 10., 'B': 20.}
         self.assert_settlement(self.market(A=11., B=18.),
-                               {'A': {'qty': 0}, 'B': {'qty': -50}},
+                               {'A': position(0), 'B': position(-50)},
                                marks, self.time, 1000., 1100., {'A': 11., 'B': 18.})
 
     def test_missing_mark_initializes_without_profit(self):
         marks = {}
-        self.assert_settlement(self.market(A=11.), {'A': {'qty': 100}},
+        self.assert_settlement(self.market(A=11.), {'A': position(100)},
                                marks, self.time, 1000., 1000., {'A': 11.})
 
     def test_suspension_preserves_mark_until_resumption(self):
         market = {'A': pd.DataFrame({'close': [12.]}, index=[self.time + pd.Timedelta(days=1)])}
         marks = {'A': 10.}
-        positions = {'A': {'qty': 100}}
+        positions = {'A': position(100)}
         self.assert_settlement(market, positions, marks, self.time, 1000., 1000., {'A': 10.})
         self.assert_settlement(market, positions, marks, self.time + pd.Timedelta(days=1),
                                1000., 1200., {'A': 12.})
@@ -84,7 +90,7 @@ class SettlementTest(StrategySettlementTest):
     def test_duplicate_dates_use_last_price(self):
         market = {'A': pd.DataFrame({'close': [11., 12.]}, index=[self.time, self.time])}
         marks = {'A': 10.}
-        self.assert_settlement(market, {'A': {'qty': 100}}, marks,
+        self.assert_settlement(market, {'A': position(100)}, marks,
                                self.time, 1000., 1200., {'A': 12.})
 
     def test_invalid_or_missing_close_propagates_nan(self):
@@ -93,7 +99,7 @@ class SettlementTest(StrategySettlementTest):
                       pd.DataFrame({'close': [float('nan')]}, index=[self.time])]:
             with self.subTest(frame=frame):
                 marks = {'A': 10.}
-                equity, next_close = self.settle({'A': frame}, {'A': {'qty': 100}}, marks,
+                equity, next_close = self.settle({'A': frame}, {'A': position(100)}, marks,
                                                  self.time, 1000.)
                 self.assertTrue(pd.isna(equity))
                 self.assertTrue(pd.isna(next_close['A']))
@@ -111,7 +117,7 @@ class SettlementTest(StrategySettlementTest):
                 return self.price
 
         marks = {'A': 10.}
-        equity, next_close = self.settle({'A': ChangingQuote(self.time)}, {'A': {'qty': 100}},
+        equity, next_close = self.settle({'A': ChangingQuote(self.time)}, {'A': position(100)},
                                          marks, self.time, 1000.)
         self.assertEqual(equity, 1100.)
         self.assertEqual(next_close, {'A': 11.})

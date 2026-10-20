@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from portfolio_accounting import calc_equity_close
-from strategy_common import (getv, atr, calc_corr_matrix,
+from strategy_common import (Position, getv, atr, calc_corr_matrix,
     calc_quantity, calc_stop_positions,
     calc_trade_records, normalize_positions, calc_position_size, calc_leverage_by_vol,
     rebalance_portfolio, build_portfolio_snapshot)
@@ -63,12 +63,12 @@ def rank_factor(market_data: dict, timestamp, factor_column="factor"):
     return sorted_factor
 
 
-def select_retained_positions(market_data: dict, positions: dict, ranked_factors, timestamp, retention_rank_limit):
+def select_retained_positions(market_data: dict, positions: dict[str, Position], ranked_factors, timestamp, retention_rank_limit) -> dict[str, Position]:
     """筛选收盘价高于止损价且排名在保留范围内的持仓。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
-        positions: 当前持仓字典，每条记录包含 stop。
+        positions: 当前 Position 持仓字典，使用 stop，不使用 take。
         ranked_factors: pandas.Series，按因子降序排列，索引为唯一标的代码；
             所有当日可交易的当前持仓必须出现在索引中。
         timestamp: 与行情索引兼容的筛选时刻。
@@ -76,8 +76,9 @@ def select_retained_positions(market_data: dict, positions: dict, ranked_factors
             严格小于此值。
 
     Returns:
-        dict，逐记录复制的保留持仓；当日无行情的持仓直接保留，其他持仓
-        须同时满足价格和排名条件。所有输入只读。
+        dict[str, Position]，新的外层保留持仓字典，允许共享不可变记录；
+        当日无行情的持仓直接保留，其他持仓须同时满足价格和排名条件。
+        所有输入只读。
     """
     reserve_pos = {}
 
@@ -86,7 +87,7 @@ def select_retained_positions(market_data: dict, positions: dict, ranked_factors
         df = market_data[sym]
         # 如果当天不能交易, 则保留仓位
         if timestamp not in df.index:
-            reserve_pos[sym] = positions[sym].copy()
+            reserve_pos[sym] = positions[sym]
             continue
 
         c = getv(df, timestamp, "close")
@@ -94,20 +95,20 @@ def select_retained_positions(market_data: dict, positions: dict, ranked_factors
 
         rank_index = ranked_factors.index.get_loc(sym)
         # 如果没有达到止盈线 或者 排序仍然靠前
-        if c > p["stop"] and rank_index < retention_rank_limit:
-            reserve_pos[sym] = positions[sym].copy()
+        if c > p.stop and rank_index < retention_rank_limit:
+            reserve_pos[sym] = positions[sym]
 
     return reserve_pos
 
 
-def calc_buy_pos(market_data: dict, held_positions: dict, ranked_factors: pd.Series, timestamp,
-                 equity, candidate_limit, stop_atr_multiple, max_trade_risk_ratio):
+def calc_buy_pos(market_data: dict, held_positions: dict[str, Position], ranked_factors: pd.Series, timestamp,
+                 equity, candidate_limit, stop_atr_multiple, max_trade_risk_ratio) -> tuple[dict[str, Position], dict[str, float]]:
     """扫描排名靠前的候选标的并计算新开仓记录。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 和
             atr 列；扫描标的应具有当日有效行情。
-        held_positions: 已持有标的的仓位字典，用于跳过已有持仓。
+        held_positions: 已持有标的的 Position 仓位字典，用于跳过已有持仓。
         ranked_factors: pandas.Series，按因子降序排列，索引为标的代码。
         timestamp: 与行情索引兼容的开仓时刻。
         equity: float，账户总权益，用于计算单笔风险预算和持仓金额上限。
@@ -116,12 +117,13 @@ def calc_buy_pos(market_data: dict, held_positions: dict, ranked_factors: pd.Ser
         max_trade_risk_ratio: float，单笔允许损失占权益的比例，如 0.02。
 
     Returns:
-        tuple[dict, dict]，即 (positions, prev_close)，分别为新开仓记录和
-        对应每股买入价基准。遇到负因子立即停止扫描，已有持仓跳过；
+        tuple[dict[str, Position], dict[str, float]]，即 (positions, prev_close)，
+        分别为新开仓记录和对应每股买入价基准，记录的 take 为 None。
+        遇到负因子立即停止扫描，已有持仓跳过；
         不过滤计算所得的零股数记录。所有输入只读。
     """
 
-    pos = {}
+    pos: dict[str, Position] = {}
     prev_close = {}
 
     for i, sym in enumerate(ranked_factors.index):
@@ -147,14 +149,8 @@ def calc_buy_pos(market_data: dict, held_positions: dict, ranked_factors: pd.Ser
         # 计算仓位
         qty = calc_position_size(equity, a, px, stop_atr_multiple, max_trade_risk_ratio)
 
-        pos[sym] = {
-            "entry": px,
-            "entry_time": timestamp,
-            "stop": stop,
-            "atr": a,
-            "qty": qty,
-            "side": 1,
-        }
+        pos[sym] = Position(
+            entry=px, entry_time=timestamp, stop=stop, atr=a, qty=qty, side=1)
         prev_close[sym] = px
 
     return pos, prev_close
@@ -182,7 +178,7 @@ def backtest(market_data: dict, params: dict, start_date=None):
                 pnl、exit_reason，记录退出和切换仓位的交易。
     """
     equity = float(params["init_equity"])
-    pos = {}
+    pos: dict[str, Position] = {}
     prev_close = {}
     trades = []
     equity_hist = []
