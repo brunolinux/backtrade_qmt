@@ -7,6 +7,7 @@ import unittest
 import pandas as pd
 
 import strategy_momentum as strategy
+import strategy_momentum_v2 as strategy_v2
 from strategy_common import Position
 
 
@@ -132,6 +133,13 @@ class TradeRecordsTest(unittest.TestCase):
         )
         baseline = [("ETF_A", 1, self.entry_time, self.exit_time, 200.0, "止盈")]
         for filename in ["strategy_momentum.py", "strategy_momentum_v2.py"]:
+            if filename == "strategy_momentum_v2.py":
+                for values, expected_rows in [(records, baseline), ([], [])]:
+                    with self.subTest(filename=filename, empty=not values):
+                        _, _, trades = strategy_v2._build_backtest_results([], [], values)
+                        expected = pd.DataFrame(expected_rows, columns=TRADE_COLUMNS)
+                        pd.testing.assert_frame_equal(trades, expected)
+                continue
             path = PROJECT_ROOT / filename
             tree = ast.parse(path.read_text(encoding="utf-8"))
             backtest = next(node for node in tree.body

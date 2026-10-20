@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from portfolio_accounting import calc_equity_close
-from strategy_common import (Position, getv, atr, calc_corr_matrix,
+from strategy_common import (Position, Trade, getv, atr, calc_corr_matrix,
     calc_quantity, calc_stop_positions,
     calc_trade_records, normalize_positions, calc_position_size, calc_leverage_by_vol,
     rebalance_portfolio, build_portfolio_snapshot)
@@ -156,8 +156,84 @@ def calc_buy_pos(market_data: dict, held_positions: dict[str, Position], ranked_
     return pos, prev_close
 
 
+def _calc_daily_positions(
+        market_data: dict, positions: dict[str, Position], close_marks: dict[str, float],
+        timestamp, equity, equity_history, params: dict
+) -> tuple[dict[str, Position], dict[str, float], list[Trade]]:
+    """计算当日止损、持仓筛选及条件开仓和调仓后的新状态。
+
+    Args:
+        market_data: 已预处理的行情字典，包含 close、atr 和 factor 列。
+        positions: 已完成当日估值、尚未处理当日止损的 Position 持仓字典。
+        close_marks: 已完成当日估值的完整价格基准，包含停牌及残留标的键。
+        timestamp: 与行情索引兼容的当日时刻。
+        equity: float，当日估值后的账户总权益，本函数不再计算权益。
+        equity_history: 按时间排列且已包含当日权益的序列，用于杠杆计算。
+        params: 原策略配置字典；所有输入只读，本函数不追加权益历史。
+
+    Returns:
+        tuple[dict[str, Position], dict[str, float], list[Trade]]，依次为新持仓、
+        完整新价格基准和当日交易列表。两个映射均独立于输入，允许共享不可变
+        Position；退出记录先于调仓记录。仅有剩余持仓名额时开仓和调仓，
+        即使未实际买入也执行该分支；新基准保留全部旧键并合入买入价。
+    """
+    stopped_positions = calc_stop_positions(market_data, positions, timestamp, params["atr_stop"])
+    ranked_factors = rank_factor(market_data, timestamp, "factor")
+    retained_positions = select_retained_positions(
+        market_data, stopped_positions, ranked_factors, timestamp, params["top_num_reserve"])
+    retained_positions = normalize_positions(retained_positions, stopped_positions)
+    daily_trades = calc_trade_records(market_data, timestamp, retained_positions, stopped_positions)
+    next_close_marks = close_marks.copy()
+
+    available_slots = params["hold_max_num"] - len(retained_positions)
+    if available_slots > 0:
+        new_positions, entry_close_marks = calc_buy_pos(
+            market_data, retained_positions, ranked_factors, timestamp, equity, available_slots,
+            params["atr_stop"], params["max_risk_per_trade"])
+        candidate_positions = {**retained_positions, **new_positions}
+        next_close_marks.update(entry_close_marks)
+
+        leverage = calc_leverage_by_vol(
+            equity_history, params["window_vol"], params["annual_factor"], params["target_vol"],
+            params["min_lev"], params["max_lev"])
+        allocation_budget = equity * leverage
+        rebalanced_positions = rebalance_portfolio(
+            market_data, candidate_positions, timestamp, allocation_budget, params["pos_change_threshold"])
+        rebalanced_positions = normalize_positions(rebalanced_positions, candidate_positions)
+        daily_trades.extend(calc_trade_records(
+            market_data, timestamp, rebalanced_positions, candidate_positions))
+        return rebalanced_positions, next_close_marks, daily_trades
+
+    return retained_positions, next_close_marks, daily_trades
+
+
+def _build_backtest_results(portfolio_rows, equity_rows, trade_records):
+    """将累计记录转换为持仓、权益曲线和交易三张结果表。
+
+    Args:
+        portfolio_rows: 仓位快照行列表，每行为日期、标的、股数和市值。
+        equity_rows: 权益行列表，每行为日期和账户总权益。
+        trade_records: Trade 记录列表；三个输入列表均只读。
+
+    Returns:
+        tuple[pandas.DataFrame, pandas.DataFrame, pandas.DataFrame]，依次为
+        portfolio、equity_curve 和 trades。前两表以 datetime 为索引，列分别
+        为 symbol/quantity/value 和 equity；交易表保留 Trade 字段顺序。
+        空表仍保留对应列，数据类型沿用 pandas 的原始推断。
+    """
+    portfolio = pd.DataFrame(
+        portfolio_rows, columns=["datetime", "symbol", "quantity", "value"]).set_index("datetime")
+    equity_curve = pd.DataFrame(
+        equity_rows, columns=["datetime", "equity"]).set_index("datetime")
+    trades = pd.DataFrame(
+        trade_records, columns=["symbol", "side", "entry_time", "exit_time", "pnl", "exit_reason"])
+    return portfolio, equity_curve, trades
+
+
 def backtest(market_data: dict, params: dict, start_date=None):
     """执行动量策略回测并返回持仓、权益曲线和交易表。
+
+    负责预处理、逐日估值和结果收集；每日持仓决策和结果表转换由私有函数处理。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 high、low、
@@ -178,88 +254,41 @@ def backtest(market_data: dict, params: dict, start_date=None):
                 pnl、exit_reason，记录退出和切换仓位的交易。
     """
     equity = float(params["init_equity"])
-    pos: dict[str, Position] = {}
-    prev_close = {}
-    trades = []
-    equity_hist = []
-    df_portfolio = []
-    curve = []
+    positions: dict[str, Position] = {}
+    close_marks = {}
+    trade_records = []
+    equity_history = []
+    portfolio_rows = []
+    equity_rows = []
 
     # 预处理
-    market_data = preprocess(market_data, params["window_atr"], params["window_short"],
-               params["window_long"], params["window_vol"])
+    processed_market_data = preprocess(
+        market_data, params["window_atr"], params["window_short"],
+        params["window_long"], params["window_vol"])
     print("预处理计算")
 
-    timeline = sorted(set().union(*[df.index for df in market_data.values()]))
+    timeline = sorted(set().union(*[df.index for df in processed_market_data.values()]))
 
     # 如果设置起始时间, 则从指定时间开始
     if start_date:
         start_date = pd.to_datetime(start_date)
 
-    for t in timeline:
-        if start_date and t < start_date:
+    for timestamp in timeline:
+        if start_date and timestamp < start_date:
             continue
 
-        # 更新盯市收益 & 收盘价信息
-        equity, prev_close = calc_equity_close(market_data, pos, prev_close, t, equity)
-        equity_hist.append(equity)
- 
-        # 更新仓位信息中的止损价格
-        pos = calc_stop_positions(market_data, pos, t, params["atr_stop"])
+        # 先估值并记录当日权益，再计算持仓和杠杆
+        equity, close_marks = calc_equity_close(
+            processed_market_data, positions, close_marks, timestamp, equity)
+        equity_history.append(equity)
+        positions, close_marks, daily_trades = _calc_daily_positions(
+            processed_market_data, positions, close_marks, timestamp, equity, equity_history, params)
+        trade_records.extend(daily_trades)
 
-        # 对截面因子排序
-        sorted_factor = rank_factor(market_data, t, "factor")
+        daily_portfolio_rows = build_portfolio_snapshot(
+            processed_market_data, positions, timestamp, equity)
+        portfolio_rows.extend(daily_portfolio_rows)
+        equity_rows.append((timestamp, equity))
+        print("{} over!!!!".format(timestamp))
 
-        # 计算保留品种
-        reserve_pos = select_retained_positions(market_data, pos, sorted_factor, t, params["top_num_reserve"])
-        # 更新卖出品种
-        reserve_pos = normalize_positions(reserve_pos, pos)
-        trades.extend(calc_trade_records(market_data, t, reserve_pos, pos))
-        pos = reserve_pos
-
-        # 计算候选品种数目
-        num_add = params["hold_max_num"] - len(pos)
-
-        # 如果有候选品种
-        if num_add > 0:
-            # 计算买入仓位和买入价格 (只考虑单个品种)
-            cur_pos, cur_close = calc_buy_pos(market_data, pos, sorted_factor, t, equity, num_add,
-                                              params["atr_stop"], params["max_risk_per_trade"])
-            pos.update(cur_pos)
-            prev_close.update(cur_close)
-
-            # 更新波动率计算杠杆率
-            lev = calc_leverage_by_vol(equity_hist, 
-                                       params["window_vol"],
-                                       params["annual_factor"],
-                                       params["target_vol"],
-                                       params["min_lev"],
-                                       params["max_lev"])
-            real_equity = equity * lev
-
-            # 调整仓位 (考虑整个资产组合)
-            cur_pos = rebalance_portfolio(market_data, pos, t, real_equity, params["pos_change_threshold"])
-            cur_pos = normalize_positions(cur_pos, pos)
-            trades.extend(calc_trade_records(market_data, t, cur_pos, pos))
-            pos = cur_pos
-
-
-        # 更新每个标的的仓位信息, 如果没有买入，则为0
-        cur_portfolio = build_portfolio_snapshot(market_data, pos, t, equity)
-        df_portfolio.extend(cur_portfolio)
-        curve.append((t, equity))
-        print("{} over!!!!".format(t))
-
-    portfolio = pd.DataFrame(df_portfolio, columns=["datetime", "symbol", "quantity", "value"]).set_index("datetime")
-
-    curve = pd.DataFrame(curve, columns=["datetime", "equity"]).set_index("datetime")
-    trades = pd.DataFrame(trades, columns=["symbol", "side", "entry_time", "exit_time", "pnl", "exit_reason"])
-
-    # for sym, df in df_all.items():
-    #     qty = portfolio.loc[portfolio["symbol"] == sym, "quantity"]
-    #     df["quantity"] = qty
-    #     df.to_csv(os.path.join(os.path.dirname(__file__), "data", "tmp", "{}.csv".format(sym)))
-
-    return portfolio, curve, trades
-
-        
+    return _build_backtest_results(portfolio_rows, equity_rows, trade_records)
