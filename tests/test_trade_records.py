@@ -157,43 +157,27 @@ class TradeRecordsTest(unittest.TestCase):
                     expected = pd.DataFrame(expected_rows, columns=TRADE_COLUMNS)
                     pd.testing.assert_frame_equal(scope["trades"], expected)
 
-    def test_csv_export_matches_ordinary_tuple_baseline(self):
+    def test_workbook_export_matches_trade_baseline(self):
+        from backtest_report import build_backtest_tables, write_backtest_workbook
         records = strategy.calc_trade_records(
-            self.market(12.0), self.exit_time, {}, {"ETF_A": self.position()},
-        )
-        path = PROJECT_ROOT / "backtest_etf_v2.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        main = next(node for node in tree.body if isinstance(node, ast.If))
-        prepare = next(node for node in main.body
-                       if isinstance(node, ast.Assign)
-                       and any(isinstance(target, ast.Name) and target.id == "trades"
-                               for target in node.targets))
-        export = next(node for node in main.body
-                      if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                      and isinstance(node.value.func, ast.Attribute)
-                      and isinstance(node.value.func.value, ast.Name)
-                      and node.value.func.value.id == "trades"
-                      and node.value.func.attr == "to_csv")
-        for values, expected_rows in [
-            (records, [("ETF_A", 1, self.entry_time, self.exit_time, 200.0, "止盈")]),
-            ([], []),
-        ]:
+            self.market(12.0), self.exit_time, {}, {'ETF_A': self.position()})
+        portfolio, _, _ = strategy_v2.build_backtest_results([], [], [])
+        for values in [records, []]:
             with self.subTest(empty=not values), TemporaryDirectory() as temp:
-                scope = {
-                    "pd": pd,
-                    "trades": pd.DataFrame(values, columns=TRADE_COLUMNS),
-                    "symbols": {"ETF_A": "示例基金"},
-                    "sub_dir": temp,
-                }
-                execute_statements([prepare, export], path, scope)
-                expected = pd.DataFrame(expected_rows, columns=TRADE_COLUMNS)
-                expected = pd.concat([
-                    pd.Series(["示例基金"] * len(expected), name="symbol", dtype=object),
-                    expected,
-                ], axis=1)
-                exported = (Path(temp) / "trade.csv").read_bytes()
-                self.assertEqual(exported,
-                                 expected.to_csv(index=False).encode("gb2312"))
+                trades = pd.DataFrame(values, columns=TRADE_COLUMNS)
+                trades['symbol'] = trades['symbol'].replace({'ETF_A': '159650'})
+                tables = build_backtest_tables(portfolio, trades, {'159650': '示例基金'})
+                path = Path(temp) / 'backtest_results.xlsx'
+                write_backtest_workbook(path, tables)
+                actual = pd.read_excel(path, sheet_name='trade')
+                self.assertEqual(list(actual.columns), ['name', *TRADE_COLUMNS])
+                if values:
+                    self.assertEqual(actual.iloc[0]['name'], '示例基金')
+                    self.assertEqual(actual.iloc[0].symbol, '159650.SZ')
+                    self.assertEqual(actual.iloc[0].pnl, 200.)
+                    self.assertEqual(actual.iloc[0].exit_reason, '止盈')
+                else:
+                    self.assertTrue(actual.empty)
 
 
 if __name__ == "__main__":

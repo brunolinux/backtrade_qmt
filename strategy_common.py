@@ -9,6 +9,8 @@ from typing import NamedTuple
 import pandas as pd
 import numpy as np
 
+from money import calc_notional, calc_price_pnl, round_money, sum_money
+
 
 class Position(NamedTuple):
     """不可变持仓记录，通过属性读取，以 _replace 创建字段变化后的新记录。
@@ -270,11 +272,13 @@ def rebalance_portfolio(
         阈值限制。无当日行情的非零记录保留；可交易记录
         的两种入场价和交易入场时间改为当日值，即使股数未变也会改写返回记录，
         调用方再通过入场信息保留函数恢复未实际调仓的成本。资金占用及裁仓使用
-        原始价；停牌记录的资金占用沿用保存的原始入场价。
+        原始价；预算及实际占用按分处理，权重与理论目标保持计算精度。
+        停牌记录的资金占用沿用保存的原始入场价。
     """
     if len(positions) == 0:
         return {}
 
+    allocation_budget = round_money(allocation_budget)
     total_risk = sum(1.0 / p.sig_atr for p in positions.values())
 
     # 在新的仓位上管理
@@ -302,7 +306,7 @@ def rebalance_portfolio(
             trade_entry_time=timestamp, sig_entry=sig_price, trade_raw_close=raw_price)
 
     # 获取股票总仓位 (只考虑可以交易的)
-    unchanged_money = 0
+    unchanged_amounts = []
     unchanged_sym_list = []
     money_list = []
     sym_list = []
@@ -310,16 +314,16 @@ def rebalance_portfolio(
         df = market_data[sym]
         if timestamp not in df.index:
             # 如果当天不能交易, 仓位不变
-            unchanged_money += p.trade_qty * p.trade_raw_close
+            unchanged_amounts.append(calc_notional(p.trade_qty, p.trade_raw_close))
             unchanged_sym_list.append(sym)
         else:
-            money_list.append(p.trade_qty * p.trade_raw_close)
+            money_list.append(calc_notional(p.trade_qty, p.trade_raw_close))
             sym_list.append(sym)
 
     money_list = np.array(money_list)
 
     # 如果现金不够, 则优先选择权重大的
-    cash = allocation_budget - np.sum(money_list) - unchanged_money
+    cash = sum_money([allocation_budget, -sum_money(money_list), -sum_money(unchanged_amounts)])
     if cash < 0:
         count = 0
         new_new_pos = {}
@@ -330,11 +334,11 @@ def rebalance_portfolio(
         # 只考虑可以交易的
         idx_list = np.argsort(money_list)[::-1]
         for idx in idx_list:
-            count += money_list[idx]
+            count = sum_money([count, money_list[idx]])
             sym = sym_list[idx]
             new_new_pos[sym] = new_pos[sym]
             if count > allocation_budget:
-                left = allocation_budget - (count - money_list[idx])
+                left = sum_money([allocation_budget, -count, money_list[idx]])
                 raw_price = new_pos[sym].trade_raw_close
                 qty = calc_quantity(left/raw_price, 100)
                 new_new_pos[sym] = new_new_pos[sym]._replace(trade_qty=qty)
@@ -395,7 +399,8 @@ def calc_trade_records(
 
     Returns:
         list[Trade]，包含退出和切换仓位的记录，收益为原持仓全部实际股数乘
-        当日原始价与原始入场价之差，报表 entry_time 来自 trade_entry_time。
+        当日原始价与原始入场价之差，再按分四舍五入；退出原因按舍入前符号判断。
+        报表 entry_time 来自 trade_entry_time。
         新开仓及原股数为零时不生成记录；退出时跳过当日入场的记录，切换时
         跳过新旧入场时间相同或股数未变的记录。入场信息修正由
         preserve_entries_for_unchanged_quantities 单独处理。
@@ -427,7 +432,7 @@ def calc_trade_records(
             side=p.side,
             entry_time=p.trade_entry_time,
             exit_time=timestamp,
-            pnl=float(pnl),
+            pnl=calc_price_pnl(p.trade_qty, px, p.trade_raw_close),
             exit_reason=reason,
         )
         trades.append(trade_info)
@@ -448,13 +453,12 @@ def calc_trade_records(
         df = market_data[sym]
         px = getv(df, timestamp, "raw_close")
         p = current_positions[sym]
-        pnl = p.trade_qty * (px - p.trade_raw_close)
         trade_info = Trade(
             symbol=sym,
             side=p.side,
             entry_time=p.trade_entry_time,
             exit_time=timestamp,
-            pnl=float(pnl),
+            pnl=calc_price_pnl(p.trade_qty, px, p.trade_raw_close),
             exit_reason="切换仓位",
         )
         trades.append(trade_info)
@@ -479,7 +483,8 @@ def build_portfolio_snapshot(
     Returns:
         list[PortfolioRow]，字段为 datetime、symbol、quantity、value。所有行情
         标的均有记录，无当日行情或未持有的标的输出零股数及零市值；末项为
-        cash，其 quantity 和 value 均为权益扣除上述持仓市值后的金额。
+        cash，其 quantity 和 value 均为按分权益扣除逐项按分市值后的金额。
+        原始行情价格保持完整精度。
     """
     cur_port: list[PortfolioRow] = []
 
@@ -495,9 +500,9 @@ def build_portfolio_snapshot(
         px = getv(df, timestamp, "raw_close")
         qty = positions[sym].trade_qty
 
-        value = px * qty
+        value = calc_notional(qty, px)
         cur_port.append(PortfolioRow(datetime=timestamp, symbol=sym, quantity=qty, value=value))
-        equity -= value
 
-    cur_port.append(PortfolioRow(datetime=timestamp, symbol="cash", quantity=equity, value=equity))
+    cash = sum_money([equity, *(-row.value for row in cur_port)])
+    cur_port.append(PortfolioRow(datetime=timestamp, symbol="cash", quantity=cash, value=cash))
     return cur_port

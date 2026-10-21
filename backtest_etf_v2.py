@@ -1,11 +1,23 @@
+"""执行 ETF 回测，保存 QMT 代码、整数数量与按分金额的 Excel 工作簿。"""
+
+from pathlib import Path
+
+from backtest_report import build_backtest_tables, write_backtest_workbook
 from factor.config_etf import getETFFundsInfo
 from factor.util import getFundsDataDict, CodeType
-# from momentum_v3 import backtest
 from strategy_momentum_v2 import backtest
-import os
-import pandas as pd
 
-if __name__ == "__main__":
+
+def main(output_dir: str | Path | None = None) -> None:
+    """运行回测并保存三张 Excel 报表，然后展示权益曲线。
+
+    Args:
+        output_dir: 输出目录，默认使用脚本旁的 data/output_v2。
+            工作簿覆盖为 backtest_results.xlsx，已有 CSV 保留。
+
+    Returns:
+        None，写出工作簿并展示图表。
+    """
     funds_info = getETFFundsInfo()    
     df_all = getFundsDataDict(funds_info, CodeType.ETF)
 
@@ -31,21 +43,9 @@ if __name__ == "__main__":
     portfolio, curve, trades = backtest(df_all, params, start_date="2026-01-01")
 
     symbols = funds_info["name"].to_dict()
-    symbols["cash"] = "现金"
-
-    sub_dir = os.path.join(os.path.dirname(__file__), "data", "output_v2")
-
-    trades = pd.concat([trades["symbol"].map(symbols), trades], axis=1)
-    trades.to_csv(f"{sub_dir}/trade.csv", encoding="GB2312", index=False)
-
-    portfolio_val = portfolio.pivot(columns="symbol", values="value")
-    # 总资产价值：所有标的市值与现金之和
-    portfolio_val["total_value"] = portfolio_val.sum(axis=1)
-    # portfolio_val = portfolio_val.rename(columns=symbols)
-    portfolio_val.to_csv(f"{sub_dir}/portfolio_value.csv", encoding="GB2312")
-    portfolio_qty = portfolio.pivot(columns="symbol", values="quantity")
-    # portfolio_qty = portfolio_qty.rename(columns=symbols)
-    portfolio_qty.to_csv(f"{sub_dir}/portfolio_qty.csv", encoding="GB2312")
+    sub_dir = Path(output_dir) if output_dir is not None else Path(__file__).parent / 'data' / 'output_v2'
+    tables = build_backtest_tables(portfolio, trades, symbols)
+    write_backtest_workbook(sub_dir / 'backtest_results.xlsx', tables)
 
 
     import matplotlib.pyplot as plt
@@ -65,5 +65,5 @@ if __name__ == "__main__":
     plt.show()
 
 
-
-        
+if __name__ == '__main__':
+    main()

@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 
+from money import calc_price_pnl, sum_money
 from strategy_common import Position, getv
 
 
@@ -17,17 +18,17 @@ def calc_mark_to_market_equity(
         prev_equity: float，上次账户总权益；所有输入只读。
 
     Returns:
-        float，上次权益加各持仓股数乘以价格变动的总和。缺当日价格不产生
+        float，旧权益及各标的价差盈亏分别按分四舍五入后求和。缺当日价格不产生
         盈亏，缺旧基准以当日价格为基准，NaN 价格按运算规则传播。
         每次均按传入的旧基准计算，无跨调用去重机制。
     """
-    equity = prev_equity
+    amounts = [prev_equity]
     for sym, qty in quantities.items():
         if sym in current_close:
             price = current_close[sym]
             previous = prev_close.get(sym, price)
-            equity += qty * (price - previous)
-    return equity
+            amounts.append(calc_price_pnl(qty, price, previous))
+    return sum_money(amounts)
 
 
 def calc_equity_close(
@@ -47,7 +48,7 @@ def calc_equity_close(
         prev_equity: float，上次账户总权益；行情、持仓及旧基准输入只读。
 
     Returns:
-        tuple[float, dict]，即 (equity, next_close)。权益按原始收盘价差计算；
+        tuple[float, dict]，即 (equity, next_close)。权益按原始价差计算并按分记账；
         新基准保留全部旧键，更新当日有行情的持仓。缺行情保留旧基准，
         缺旧基准使用当日原始价；重复索引取最后一条，无效原始价按 NaN 传播，
         不回退到复权 close。保存的入场价不随估值更新。
