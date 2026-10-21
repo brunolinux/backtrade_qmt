@@ -145,19 +145,37 @@ class AccountingCoreTest(unittest.TestCase):
             {'A': 0, 'B': -50}, {'A': 11., 'B': 18.},
             {'A': 10., 'B': 20.}, 1000.), 1100.)
 
-    def test_mark_builder_preserves_other_keys_and_both_inputs(self):
-        from portfolio_accounting import build_close_marks
+    def test_equity_close_preserves_other_marks_and_inputs(self):
+        from portfolio_accounting import calc_equity_close
 
-        current = {'A': 11., 'NEW': 15.}
-        marks = {'A': 10., 'STALE': 7.}
-        result = build_close_marks(current, marks)
-        self.assertEqual(result, {'A': 11., 'NEW': 15., 'STALE': 7.})
-        self.assertEqual(marks, {'A': 10., 'STALE': 7.})
-        self.assertEqual(current, {'A': 11., 'NEW': 15.})
-        result['A'] = 999.
-        self.assertEqual(marks, {'A': 10., 'STALE': 7.})
-        self.assertEqual(current, {'A': 11., 'NEW': 15.})
-        empty_result = build_close_marks({}, marks)
+        timestamp = pd.Timestamp('2026-01-06')
+        market = {
+            'A': pd.DataFrame({'close': [11.]}, index=[timestamp]),
+            'NEW': pd.DataFrame({'close': [15.]}, index=[timestamp]),
+            'SUSPENDED': pd.DataFrame(
+                {'close': [21.]}, index=[timestamp + pd.Timedelta(days=1)]),
+        }
+        positions = {symbol: position(quantity)
+                     for symbol, quantity in [('A', 100), ('NEW', 100), ('SUSPENDED', 10)]}
+        marks = {'A': 10., 'SUSPENDED': 20., 'STALE': 7.}
+        original_market = deepcopy(market)
+        original_positions = deepcopy(positions)
+        original_marks = marks.copy()
+
+        equity, next_marks = calc_equity_close(market, positions, marks, timestamp, 1000.)
+
+        self.assertEqual(equity, 1100.)
+        self.assertEqual(next_marks, {
+            'A': 11., 'NEW': 15., 'SUSPENDED': 20., 'STALE': 7.,
+        })
+        self.assertIsNot(next_marks, marks)
+        self.assertEqual((positions, marks), (original_positions, original_marks))
+        for symbol in market:
+            assert_frame_equal(market[symbol], original_market[symbol])
+        next_marks['A'] = 999.
+        self.assertEqual(marks, original_marks)
+
+        empty_result = calc_equity_close({}, {}, marks, timestamp, 1000.)[1]
         self.assertEqual(empty_result, marks)
         self.assertIsNot(empty_result, marks)
 

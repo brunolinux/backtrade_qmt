@@ -136,7 +136,7 @@ class TradeRecordsTest(unittest.TestCase):
             if filename == "strategy_momentum_v2.py":
                 for values, expected_rows in [(records, baseline), ([], [])]:
                     with self.subTest(filename=filename, empty=not values):
-                        _, _, trades = strategy_v2._build_backtest_results([], [], values)
+                        _, _, trades = strategy_v2.build_backtest_results([], [], values)
                         expected = pd.DataFrame(expected_rows, columns=TRADE_COLUMNS)
                         pd.testing.assert_frame_equal(trades, expected)
                 continue

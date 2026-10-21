@@ -198,6 +198,13 @@ class PortfolioBaselineTest(unittest.TestCase):
                                 (self.time, 'SUSPENDED', 0, 0),
                                 (self.time, 'UNHELD', 0, 0),
                                 (self.time, 'cash', 800., 800.)])
+        self.assertTrue(all(isinstance(row, common.PortfolioRow) for row in rows))
+        self.assertIsInstance(rows[0], tuple)
+        self.assertEqual(rows[0]._fields, ('datetime', 'symbol', 'quantity', 'value'))
+        self.assertEqual((rows[0].datetime, rows[0].symbol, rows[0].quantity, rows[0].value),
+                         (self.time, 'A', 100, 1200.))
+        self.assertEqual((rows[-1].symbol, rows[-1].quantity, rows[-1].value),
+                         ('cash', 800., 800.))
         self.assertEqual(positions, original)
 
 

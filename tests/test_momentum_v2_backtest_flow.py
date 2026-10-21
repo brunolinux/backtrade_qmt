@@ -7,13 +7,32 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 import strategy_momentum_v2 as momentum
-from strategy_common import Position, Trade
+from strategy_common import Position, PortfolioRow, Trade
 
 
 class BacktestResultsTest(unittest.TestCase):
+    def test_named_rows_keep_result_tables_identical_to_positional_rows(self):
+        timestamp = pd.Timestamp('2026-01-06')
+        portfolio_row = PortfolioRow(datetime=timestamp, symbol='A', quantity=100, value=1200.)
+        equity_row = momentum.EquityRow(datetime=timestamp, equity=1500.)
+        trade = Trade('A', 1, timestamp, timestamp, 200., '止盈')
+        self.assertEqual(portfolio_row._fields, ('datetime', 'symbol', 'quantity', 'value'))
+        self.assertEqual(equity_row._fields, ('datetime', 'equity'))
+        self.assertEqual(trade._fields,
+                         ('symbol', 'side', 'entry_time', 'exit_time', 'pnl', 'exit_reason'))
+        self.assertEqual((portfolio_row.symbol, equity_row.equity), ('A', 1500.))
+        named_rows = ([portfolio_row], [equity_row], [trade])
+        before = deepcopy(named_rows)
+        named_tables = momentum.build_backtest_results(*named_rows)
+        positional_tables = momentum.build_backtest_results(
+            [(timestamp, 'A', 100, 1200.)], [(timestamp, 1500.)], [tuple(trade)])
+        for named_table, positional_table in zip(named_tables, positional_tables):
+            assert_frame_equal(named_table, positional_table)
+        self.assertEqual(named_rows, before)
+
     def test_empty_results_preserve_columns_index_and_dtypes(self):
         rows = ([], [], [])
-        results = momentum._build_backtest_results(*rows)
+        results = momentum.build_backtest_results(*rows)
         expected = (
             pd.DataFrame(columns=['symbol', 'quantity', 'value'],
                          index=pd.Index([], name='datetime', dtype=object)),
@@ -32,7 +51,7 @@ class BacktestResultsTest(unittest.TestCase):
                 [(timestamp, 1500.)],
                 [Trade('A', 1, entry_time, timestamp, 200., '止盈')])
         before = deepcopy(rows)
-        portfolio, curve, trades = momentum._build_backtest_results(*rows)
+        portfolio, curve, trades = momentum.build_backtest_results(*rows)
         expected_portfolio = pd.DataFrame(
             {'symbol': ['A', 'cash'], 'quantity': [100., 300.], 'value': [1200., 300.]},
             index=pd.DatetimeIndex([timestamp, timestamp], name='datetime'))
@@ -66,10 +85,10 @@ class DailyPositionsTest(unittest.TestCase):
     def calculate(self, market, positions, marks, params, equity=10000.):
         history = [equity]
         before = deepcopy((market, positions, marks, history, params))
-        first = momentum._calc_daily_positions(
+        first = momentum.calc_daily_positions(
             market_data=market, positions=positions, close_marks=marks,
             timestamp=self.timestamp, equity=equity, equity_history=history, params=params)
-        second = momentum._calc_daily_positions(
+        second = momentum.calc_daily_positions(
             market, positions, marks, self.timestamp, equity, history, params)
         self.assertEqual(first, second)
         self.assertIsNot(first[0], positions)

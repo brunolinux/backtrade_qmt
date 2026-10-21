@@ -43,6 +43,15 @@ class Trade(NamedTuple):
     exit_reason: str         # 卖出原因
 
 
+class PortfolioRow(NamedTuple):
+    """每日标的或现金的持仓快照行。"""
+
+    datetime: pd.Timestamp
+    symbol: str
+    quantity: float
+    value: float
+
+
 def getv(dataframe, index_label, column):
     """读取指定索引和列的浮点值。
 
@@ -446,7 +455,7 @@ def build_portfolio_snapshot(
         positions: dict[str, Position],
         timestamp,
         equity: float,
-        ) -> list[tuple]:
+        ) -> list[PortfolioRow]:
     """构建当日各标的与现金的仓位快照。
 
     Args:
@@ -456,27 +465,27 @@ def build_portfolio_snapshot(
         equity: 当日账户总权益，用于扣除可估值持仓后计算现金。
 
     Returns:
-        list[tuple]，每项为 (timestamp, symbol, quantity, value)。所有行情
+        list[PortfolioRow]，字段为 datetime、symbol、quantity、value。所有行情
         标的均有记录，无当日行情或未持有的标的输出零股数及零市值；末项为
         cash，其 quantity 和 value 均为权益扣除上述持仓市值后的金额。
     """
-    cur_port = []
+    cur_port: list[PortfolioRow] = []
 
     for sym, df in market_data.items():
         if timestamp not in df.index:
-            cur_port.append((timestamp, sym, 0, 0))
+            cur_port.append(PortfolioRow(datetime=timestamp, symbol=sym, quantity=0, value=0))
             continue
 
         if sym not in positions.keys():
-            cur_port.append((timestamp, sym, 0, 0))
+            cur_port.append(PortfolioRow(datetime=timestamp, symbol=sym, quantity=0, value=0))
             continue
 
         px = getv(df, timestamp, "close")
         qty = positions[sym].qty
 
         value = px * qty
-        cur_port.append((timestamp, sym, qty, value))
+        cur_port.append(PortfolioRow(datetime=timestamp, symbol=sym, quantity=qty, value=value))
         equity -= value
 
-    cur_port.append((timestamp, "cash", equity, equity))
+    cur_port.append(PortfolioRow(datetime=timestamp, symbol="cash", quantity=equity, value=equity))
     return cur_port

@@ -30,22 +30,6 @@ def calc_mark_to_market_equity(
     return equity
 
 
-def build_close_marks(
-        current_close: Mapping[str, float],
-        prev_close: Mapping[str, float]) -> dict[str, float]:
-    """合并当日收盘价与旧估值基准。
-
-    Args:
-        current_close: 当日有行情标的的每股收盘价映射，无行情标的应省略。
-        prev_close: 上次每股估值价格的映射；两个输入只读。
-
-    Returns:
-        dict[str, float]，独立的完整新基准字典。当日键覆盖旧值，包括 NaN；
-        未出现在当日映射中的旧键保留。
-    """
-    return {**prev_close, **current_close}
-
-
 def calc_equity_close(
         market_data: dict,
         positions: dict[str, Position],
@@ -77,5 +61,6 @@ def calc_equity_close(
             current_close[sym] = getv(df, timestamp, 'close')
 
     equity = calc_mark_to_market_equity(quantities, current_close, prev_close, prev_equity)
-    next_close = build_close_marks(current_close, prev_close)
+    # 非常有意思的代码
+    next_close = {**prev_close, **current_close}
     return equity, next_close

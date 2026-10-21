@@ -125,8 +125,6 @@ class AccountingKeywordsTest(unittest.TestCase):
         self.assertEqual(accounting.calc_mark_to_market_equity(
             quantities={'A': 100}, current_close={'A': 12.},
             prev_close=previous, prev_equity=1000.), 1200.)
-        self.assertEqual(accounting.build_close_marks(
-            current_close={'A': 12., 'C': 15.}, prev_close=previous), marks)
         for symbol in market:
             assert_frame_equal(market[symbol], original[0][symbol])
         self.assertEqual((positions, previous), original[1:])
