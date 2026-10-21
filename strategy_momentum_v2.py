@@ -3,7 +3,7 @@ import numpy as np
 from portfolio_accounting import calc_equity_close
 from strategy_common import (Position, Trade, getv, atr, calc_corr_matrix,
     calc_quantity, calc_stop_positions,
-    calc_trade_records, normalize_positions, calc_position_size, calc_leverage_by_vol,
+    calc_trade_records, preserve_entries_for_unchanged_quantities, calc_position_size, calc_leverage_by_vol,
     rebalance_portfolio, build_portfolio_snapshot)
 
 
@@ -207,34 +207,42 @@ def _calc_daily_positions(
         Position；退出记录先于调仓记录。仅有剩余持仓名额时开仓和调仓，
         即使未实际买入也执行该分支；新基准保留全部旧键并合入买入价。
     """
+    # step 1: 根据最新收盘价更新止损价格
     stopped_positions = calc_stop_positions(market_data, positions, timestamp, params["atr_stop"])
+    # step 2: 根据最新因子对标的排序
     ranked_factors = rank_factor(market_data, timestamp, "factor")
+    # step 3: 从现有持有标的中选出继续持有的标的
     retained_positions = select_retained_positions(
         market_data, stopped_positions, ranked_factors, timestamp, params["top_num_reserve"])
-    retained_positions = normalize_positions(retained_positions, stopped_positions)
+    # step 4: 记录标的卖出交易
     daily_trades = calc_trade_records(market_data, timestamp, retained_positions, stopped_positions)
+    # step 5: 更新所有标的的最新收盘价信息
     next_close_marks = close_marks.copy()
 
+    # step 6: 判断是否有剩余标的名额
     available_slots = params["hold_max_num"] - len(retained_positions)
-    if available_slots > 0:
-        new_positions, entry_close_marks = calc_buy_pos(
-            market_data, retained_positions, ranked_factors, timestamp, equity, available_slots,
-            params["atr_stop"], params["max_risk_per_trade"])
-        candidate_positions = {**retained_positions, **new_positions}
-        next_close_marks.update(entry_close_marks)
+    if available_slots <= 0:
+        return retained_positions, next_close_marks, daily_trades
 
-        leverage = calc_leverage_by_vol(
-            equity_history, params["window_vol"], params["annual_factor"], params["target_vol"],
-            params["min_lev"], params["max_lev"])
-        allocation_budget = equity * leverage
-        rebalanced_positions = rebalance_portfolio(
-            market_data, candidate_positions, timestamp, allocation_budget, params["pos_change_threshold"])
-        rebalanced_positions = normalize_positions(rebalanced_positions, candidate_positions)
-        daily_trades.extend(calc_trade_records(
-            market_data, timestamp, rebalanced_positions, candidate_positions))
-        return rebalanced_positions, next_close_marks, daily_trades
+    # 如果有剩余持仓名额，则开仓并调仓,
+    # 注意: 不执行日频调仓 (可选方案)
+    # step 7: 仅考虑单只标的最大亏损的情况下计算持有
+    new_positions, entry_close_marks = calc_buy_pos(
+        market_data, retained_positions, ranked_factors, timestamp, equity, available_slots,
+        params["atr_stop"], params["max_risk_per_trade"])
+    candidate_positions = {**retained_positions, **new_positions}
+    next_close_marks.update(entry_close_marks)
 
-    return retained_positions, next_close_marks, daily_trades
+    leverage = calc_leverage_by_vol(
+        equity_history, params["window_vol"], params["annual_factor"], params["target_vol"],
+        params["min_lev"], params["max_lev"])
+    allocation_budget = equity * leverage
+    rebalanced_positions = rebalance_portfolio(
+        market_data, candidate_positions, timestamp, allocation_budget, params["pos_change_threshold"])
+    rebalanced_positions = preserve_entries_for_unchanged_quantities(rebalanced_positions, candidate_positions)
+    daily_trades.extend(calc_trade_records(
+        market_data, timestamp, rebalanced_positions, candidate_positions))
+    return rebalanced_positions, next_close_marks, daily_trades
 
 
 def _build_backtest_results(portfolio_rows, equity_rows, trade_records):
@@ -283,11 +291,18 @@ def backtest(market_data: dict, params: dict, start_date=None):
             trades: 默认整数索引，列为 symbol、side、entry_time、exit_time、
                 pnl、exit_reason，记录退出和切换仓位的交易。
     """
+    # 跨交易日账户状态：每轮估值前的上次权益，以及上轮决策后的持仓
     equity = float(params["init_equity"])
     positions: dict[str, Position] = {}
+
+    # 盯市基准：各标的最近一次可用收盘价，供下一轮估值使用
     close_marks = {}
+
+    # 累计交易与已估值权益；权益历史供波动率杠杆计算
     trade_records = []
     equity_history = []
+
+    # 报表原始行：每日持仓（含现金）及权益，循环后转换为结果表
     portfolio_rows = []
     equity_rows = []
 
@@ -307,7 +322,7 @@ def backtest(market_data: dict, params: dict, start_date=None):
         if start_date and timestamp < start_date:
             continue
 
-        # 先估值并记录当日权益，再计算持仓和杠杆
+        # 逐日更新账户市值，
         equity, close_marks = calc_equity_close(
             processed_market_data, positions, close_marks, timestamp, equity)
         equity_history.append(equity)

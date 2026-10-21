@@ -89,7 +89,7 @@ class PortfolioKeywordsTest(unittest.TestCase):
         current = {'A': self.position}
         candidates = {'A': self.position._replace(entry=12., entry_time=self.timestamp)}
         original = deepcopy((current, candidates))
-        normalized = common.normalize_positions(
+        normalized = common.preserve_entries_for_unchanged_quantities(
             candidate_positions=candidates, current_positions=current)
         self.assertEqual(normalized, current)
         self.assertEqual(common.calc_trade_records(

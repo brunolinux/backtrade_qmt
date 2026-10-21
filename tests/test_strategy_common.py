@@ -184,7 +184,7 @@ class PortfolioBaselineTest(unittest.TestCase):
         new = {'A': self.position(entry=12., entry_time=self.time)}
         candidate = deepcopy(new)
         self.assertEqual(self.module.calc_trade_records(market, self.time, new, old), [])
-        normalized = self.module.normalize_positions(new, old)
+        normalized = self.module.preserve_entries_for_unchanged_quantities(new, old)
         self.assertEqual(normalized, original)
         self.assertEqual(new, candidate)
         self.assertEqual(old, original)

@@ -10,6 +10,39 @@ import pandas as pd
 import numpy as np
 
 
+class Position(NamedTuple):
+    """不可变持仓记录，通过属性读取，以 _replace 创建字段变化后的新记录。
+
+    Attributes:
+        qty: 带符号的持仓股数。
+        side: 持仓方向。
+        entry: 每股入场价格。
+        entry_time: 入场时刻。
+        stop: 每股止损价格。
+        atr: 建仓时的 ATR。
+        take: 旧策略的每股止盈价格，v2 不使用，默认为 None。
+    """
+
+    qty: int
+    side: int
+    entry: float
+    entry_time: pd.Timestamp
+    stop: float
+    atr: float
+    take: float | None = None
+
+
+class Trade(NamedTuple):
+    """已生成的交易记录，字段顺序与交易表一致。"""
+
+    symbol: str              # 品种代码
+    side: int                # 持仓方向
+    entry_time: pd.Timestamp  # 买入时刻
+    exit_time: pd.Timestamp  # 卖出时刻
+    pnl: float               # 交易收益
+    exit_reason: str         # 卖出原因
+
+
 def getv(dataframe, index_label, column):
     """读取指定索引和列的浮点值。
 
@@ -66,7 +99,10 @@ def atr(price_data, window=10):
     return tr.rolling(window).mean()
 
 
-def calc_corr_matrix(market_data: dict, price_column: str = "close") -> pd.DataFrame:
+def calc_corr_matrix(
+        market_data: dict,
+        price_column: str = "close"
+        ) -> pd.DataFrame:
     """计算各标的对数收益率的相关矩阵。
 
     Args:
@@ -110,8 +146,8 @@ def calc_position_size(
         max_trade_risk_ratio: 单笔风险占权益的比例, 例如 0.02。
 
     Returns:
-        int，按 100 股向零取整且不超过权益金额上限的开仓股数。
-        每股止损风险非正时返回 0；不修改输入。
+        按 100 股向零取整且不超过权益金额上限的开仓股数。
+        每股止损风险非正时返回 0; 不修改输入。
     """
     # 该品种每手最大可能损失
     risk_per_share = atr_value * stop_atr_multiple
@@ -149,7 +185,7 @@ def calc_leverage_by_vol(
         max_leverage: 样本充足时允许的杠杆上限。
 
     Returns:
-        float，按上下限裁剪的波动率目标杠杆。权益观测数量不足窗口时
+        按上下限裁剪的波动率目标杠杆。权益观测数量不足窗口时
         直接返回 1.0，此时不应用上下限裁剪。
     """
     if len(equity_history) < volatility_window:
@@ -165,44 +201,11 @@ def calc_leverage_by_vol(
     return vol_scale
 
 
-class Position(NamedTuple):
-    """不可变持仓记录，通过属性读取，以 _replace 创建字段变化后的新记录。
-
-    Attributes:
-        qty: 带符号的持仓股数。
-        side: 持仓方向。
-        entry: 每股入场价格。
-        entry_time: 入场时刻。
-        stop: 每股止损价格。
-        atr: 建仓时的 ATR。
-        take: 旧策略的每股止盈价格，v2 不使用，默认为 None。
-    """
-
-    qty: int
-    side: int
-    entry: float
-    entry_time: pd.Timestamp
-    stop: float
-    atr: float
-    take: float | None = None
-
-
-class Trade(NamedTuple):
-    """已生成的交易记录，字段顺序与交易表一致。"""
-
-    symbol: str              # 品种代码
-    side: int                # 持仓方向
-    entry_time: pd.Timestamp  # 买入时刻
-    exit_time: pd.Timestamp  # 卖出时刻
-    pnl: float               # 交易收益
-    exit_reason: str         # 卖出原因
-
-
 def calc_stop_positions(
         market_data: dict,
         positions: dict[str, Position],
         timestamp,
-        stop_atr_multiple
+        stop_atr_multiple: float,
         ) -> dict[str, Position]:
     """根据当日收盘价提高持仓止损价。
 
@@ -210,7 +213,7 @@ def calc_stop_positions(
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
         positions: 当前 Position 持仓字典，使用 stop 和建仓时的 atr；输入只读。
         timestamp: 与行情索引兼容的当前时刻。
-        stop_atr_multiple: float，止损距离相对持仓 atr 的倍数。
+        stop_atr_multiple: 止损距离相对持仓 atr 的倍数。
 
     Returns:
         dict[str, Position]，新的外层持仓字典；止损只升不降，未变化的
@@ -233,8 +236,8 @@ def rebalance_portfolio(
         market_data: dict,
         positions: dict[str, Position],
         timestamp,
-        allocation_budget,
-        quantity_change_threshold_ratio
+        allocation_budget: float,
+        quantity_change_threshold_ratio: float,
         ) -> dict[str, Position]:
     """按 ATR 倒数分配预算并调整持仓股数。
 
@@ -243,8 +246,8 @@ def rebalance_portfolio(
         positions: 当前 Position 持仓字典，使用 atr、qty、side、entry 和
             entry_time；行情及持仓输入只读。
         timestamp: 与行情索引兼容的调仓时刻。
-        allocation_budget: float，可分配的持仓金额预算，通常为权益乘以杠杆。
-        quantity_change_threshold_ratio: float，目标股数与当前绝对股数之差
+        allocation_budget: 可分配的持仓金额预算，通常为权益乘以杠杆。
+        quantity_change_threshold_ratio: 目标股数与当前绝对股数之差
             相对当前绝对股数的阈值；按 ATR 分配的目标调整仅在严格超过时执行。
 
     Returns:
@@ -329,7 +332,7 @@ def rebalance_portfolio(
     return out_pos
 
 
-def normalize_positions(
+def preserve_entries_for_unchanged_quantities(
         candidate_positions: dict[str, Position],
         current_positions: dict[str, Position]
         ) -> dict[str, Position]:
@@ -355,7 +358,12 @@ def normalize_positions(
     return normalized
 
 
-def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict[str, Position], current_positions: dict[str, Position]) -> list[Trade]:
+def calc_trade_records(
+        market_data:dict,
+        timestamp,
+        candidate_positions: dict[str, Position],
+        current_positions: dict[str, Position]
+        ) -> list[Trade]:
     """根据持仓退出和股数变化计算交易记录。
 
     Args:
@@ -369,7 +377,7 @@ def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict[st
         list[Trade]，包含退出和切换仓位的记录，收益按原持仓全部股数计算。
         新开仓及原股数为零时不生成记录；退出时跳过当日入场的记录，切换时
         跳过新旧入场时间相同或股数未变的记录。入场信息修正由
-        normalize_positions 单独处理。
+        preserve_entries_for_unchanged_quantities 单独处理。
     """
     trades: list[Trade] = []
     old_sym = set(current_positions.keys())
@@ -433,14 +441,19 @@ def calc_trade_records(market_data:dict, timestamp, candidate_positions: dict[st
     return trades
 
 
-def build_portfolio_snapshot(market_data: dict, positions: dict[str, Position], timestamp, equity):
+def build_portfolio_snapshot(
+        market_data: dict,
+        positions: dict[str, Position],
+        timestamp,
+        equity: float,
+        ) -> list[tuple]:
     """构建当日各标的与现金的仓位快照。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
         positions: 当前 Position 持仓字典，使用 qty；行情及持仓输入只读。
         timestamp: 与行情索引兼容的快照时刻。
-        equity: float，当日账户总权益，用于扣除可估值持仓后计算现金。
+        equity: 当日账户总权益，用于扣除可估值持仓后计算现金。
 
     Returns:
         list[tuple]，每项为 (timestamp, symbol, quantity, value)。所有行情

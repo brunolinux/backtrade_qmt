@@ -4,7 +4,7 @@ from portfolio_accounting import calc_equity_close
 from strategy_common import (
     Position, Trade, getv, atr, calc_corr_matrix, calc_quantity, calc_position_size,
     calc_leverage_by_vol, calc_stop_positions, rebalance_portfolio, calc_trade_records,
-    normalize_positions,
+    preserve_entries_for_unchanged_quantities,
     build_portfolio_snapshot,
 )
 
@@ -215,7 +215,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
 
         # 更新保留仓位, 卖出部分仓位
         reserve_pos = select_retained_positions(df_all, pos, t)
-        reserve_pos = normalize_positions(reserve_pos, pos)
+        reserve_pos = preserve_entries_for_unchanged_quantities(reserve_pos, pos)
         trades.extend(calc_trade_records(df_all, t, reserve_pos, pos))
         pos = reserve_pos
 
@@ -246,7 +246,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
 
             # 调整仓位 (考虑整个资产组合)
             cur_pos = rebalance_portfolio(df_all, pos, t, real_equity, params["pos_change_threshold"])
-            cur_pos = normalize_positions(cur_pos, pos)
+            cur_pos = preserve_entries_for_unchanged_quantities(cur_pos, pos)
             trades.extend(calc_trade_records(df_all, t, cur_pos, pos))
             pos = cur_pos
 

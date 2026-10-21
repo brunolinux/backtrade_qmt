@@ -73,7 +73,7 @@ class BuySignalInputsTest(unittest.TestCase):
         stopped = strategy.calc_stop_positions(market, positions, timestamp, 2.)
         retained = strategy.select_retained_positions(market, stopped, timestamp)
         allocated = strategy.rebalance_portfolio(market, retained, timestamp, 6000., .2)
-        normalized = strategy.normalize_positions(allocated, retained)
+        normalized = strategy.preserve_entries_for_unchanged_quantities(allocated, retained)
         for result in (stopped, retained, allocated, normalized):
             self.assertEqual(result['A'].take, 15.)
             self.assertIsNot(result, positions)
@@ -130,15 +130,15 @@ class NormalizePositionsTest(unittest.TestCase):
             with self.subTest(old=old, candidate=candidate):
                 new = {'A': candidate}
                 original = deepcopy((old, new))
-                result = strategy_common.normalize_positions(new, old)
+                result = strategy_common.preserve_entries_for_unchanged_quantities(new, old)
                 self.assertEqual(result, {'A': expected})
                 self.assertEqual((old, new), original)
-                self.assertEqual(strategy_common.normalize_positions(new, old), result)
+                self.assertEqual(strategy_common.preserve_entries_for_unchanged_quantities(new, old), result)
                 self.assertIsNot(result, new)
                 result['OUTPUT_ONLY'] = result.pop('A')._replace(entry=999.)
                 self.assertEqual((old, new), original)
         new = {}
-        result = strategy_common.normalize_positions(new, {'A': old_record})
+        result = strategy_common.preserve_entries_for_unchanged_quantities(new, {'A': old_record})
         self.assertEqual(result, {})
         self.assertIsNot(result, new)
 

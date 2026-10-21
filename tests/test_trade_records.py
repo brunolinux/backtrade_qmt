@@ -103,7 +103,7 @@ class TradeRecordsTest(unittest.TestCase):
         original = self.position()
         new_pos = {"ETF_A": self.position(entry=12.0, entry_time=self.exit_time)}
         candidate = deepcopy(new_pos)
-        normalized = strategy.normalize_positions(new_pos, {"ETF_A": original})
+        normalized = strategy.preserve_entries_for_unchanged_quantities(new_pos, {"ETF_A": original})
         records = strategy.calc_trade_records(
             self.market(12.0), self.exit_time, normalized, {"ETF_A": original},
         )
