@@ -74,11 +74,11 @@ class DailyPositionsTest(unittest.TestCase):
         self.params = dict(atr_stop=2., top_num_reserve=3, hold_max_num=1,
                            max_risk_per_trade=1., window_vol=3, annual_factor=252,
                            target_vol=.3, min_lev=1., max_lev=1., pos_change_threshold=.2)
-        self.position = Position(qty=100, side=1, entry=10., entry_time=self.entry_time,
-                                 stop=8., atr=1.)
+        self.position = Position(trade_qty=100, side=1, trade_raw_close=10., sig_entry=10., trade_entry_time=self.entry_time,
+                                 sig_stop=8., sig_atr=1.)
 
     def market(self, **quotes):
-        return {symbol: pd.DataFrame({'close': [price], 'atr': [1.], 'factor': [score]},
+        return {symbol: pd.DataFrame({'raw_close': [price], 'close': [price], 'atr': [1.], 'factor': [score]},
                                      index=[self.timestamp])
                 for symbol, (price, score) in quotes.items()}
 
@@ -104,7 +104,7 @@ class DailyPositionsTest(unittest.TestCase):
     def test_full_portfolio_raises_stop_without_rebalancing(self):
         positions, marks, trades = self.calculate(
             self.market(A=(12., 1.)), {'A': self.position}, {'A': 12., 'STALE': 7.}, self.params)
-        self.assertEqual(positions, {'A': self.position._replace(stop=10.)})
+        self.assertEqual(positions, {'A': self.position._replace(sig_stop=10.)})
         self.assertEqual(marks, {'A': 12., 'STALE': 7.})
         self.assertEqual(trades, [])
 
@@ -113,22 +113,22 @@ class DailyPositionsTest(unittest.TestCase):
             self.market(A=(12., 1.)), {'A': self.position}, {'A': 12., 'STALE': 7.},
             dict(self.params, hold_max_num=2))
         self.assertEqual(positions, {'A': self.position._replace(
-            qty=800, entry=12., entry_time=self.timestamp, stop=10.)})
+            trade_qty=800, trade_raw_close=12., sig_entry=12., trade_entry_time=self.timestamp, sig_stop=10.)})
         self.assertEqual(marks, {'A': 12., 'STALE': 7.})
         self.assertEqual(trades, [Trade('A', 1, self.entry_time, self.timestamp, 200., '切换仓位')])
 
     def test_exits_precede_rebalance_and_marks_include_suspended_and_new_holdings(self):
         market = self.market(A=(8., 1.), B=(20., 3.), C=(12., 2.))
-        market['D'] = pd.DataFrame({'close': [7.]}, index=[self.entry_time])
-        original = {'A': self.position._replace(stop=9.), 'C': self.position,
-                    'D': self.position._replace(entry=7., stop=6.)}
+        market['D'] = pd.DataFrame({'raw_close': [7.], 'close': [7.]}, index=[self.entry_time])
+        original = {'A': self.position._replace(sig_stop=9.), 'C': self.position,
+                    'D': self.position._replace(trade_raw_close=7., sig_entry=7., sig_stop=6.)}
         previous = {'A': 8., 'C': 12., 'D': 7., 'STALE': 99.}
         params = dict(self.params, hold_max_num=3)
         positions, marks, trades = self.calculate(market, original, previous, params)
         self.assertEqual(positions, {
-            'C': self.position._replace(qty=200, entry=12., entry_time=self.timestamp, stop=10.),
+            'C': self.position._replace(trade_qty=200, trade_raw_close=12., sig_entry=12., trade_entry_time=self.timestamp, sig_stop=10.),
             'D': original['D'],
-            'B': Position(qty=100, side=1, entry=20., entry_time=self.timestamp, stop=18., atr=1.),
+            'B': Position(trade_qty=100, side=1, trade_raw_close=20., sig_entry=20., trade_entry_time=self.timestamp, sig_stop=18., sig_atr=1.),
         })
         self.assertEqual(marks, dict(previous, B=20.))
         self.assertEqual(trades, [
@@ -145,7 +145,7 @@ class BacktestFlowTest(unittest.TestCase):
         self.dates = pd.date_range('2026-01-05', periods=6)
         prices = [10., 11., 13., 14., 12., 11.]
         self.market = {'A': pd.DataFrame({
-            'close': prices, 'high': [p + 1 for p in prices], 'low': [p - 1 for p in prices],
+            'raw_close': prices, 'close': prices, 'high': [p + 1 for p in prices], 'low': [p - 1 for p in prices],
         }, index=self.dates)}
         self.params = dict(
             init_equity=10000., window_atr=2, window_short=1, window_long=2,

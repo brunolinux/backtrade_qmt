@@ -12,8 +12,8 @@ from strategy_common import Position
 
 
 def position(qty):
-    return Position(qty=qty, side=1, entry=10., entry_time=pd.Timestamp('2026-01-05'),
-                    stop=9., atr=1.)
+    return Position(trade_qty=qty, side=1, trade_raw_close=10., sig_entry=10., trade_entry_time=pd.Timestamp('2026-01-05'),
+                    sig_stop=9., sig_atr=1.)
 
 
 class StrategySettlementTest(unittest.TestCase):
@@ -25,7 +25,7 @@ class StrategySettlementTest(unittest.TestCase):
         self.time = pd.Timestamp('2026-01-06')
 
     def market(self, **prices):
-        return {sym: pd.DataFrame({'close': [price]}, index=[self.time])
+        return {sym: pd.DataFrame({'raw_close': [price], 'close': [price]}, index=[self.time])
                 for sym, price in prices.items()}
 
     def assert_settlement(self, market, positions, marks, time, prev_equity,
@@ -73,7 +73,7 @@ class StrategySettlementTest(unittest.TestCase):
                                marks, self.time, 1000., 1000., {'A': 11.})
 
     def test_suspension_preserves_mark_until_resumption(self):
-        market = {'A': pd.DataFrame({'close': [12.]}, index=[self.time + pd.Timedelta(days=1)])}
+        market = {'A': pd.DataFrame({'raw_close': [12.], 'close': [12.]}, index=[self.time + pd.Timedelta(days=1)])}
         marks = {'A': 10.}
         positions = {'A': position(100)}
         self.assert_settlement(market, positions, marks, self.time, 1000., 1000., {'A': 10.})
@@ -88,15 +88,15 @@ class SettlementTest(StrategySettlementTest):
         return calc_equity_close(*args, **kwargs)
 
     def test_duplicate_dates_use_last_price(self):
-        market = {'A': pd.DataFrame({'close': [11., 12.]}, index=[self.time, self.time])}
+        market = {'A': pd.DataFrame({'raw_close': [11., 12.], 'close': [11., 12.]}, index=[self.time, self.time])}
         marks = {'A': 10.}
         self.assert_settlement(market, {'A': position(100)}, marks,
                                self.time, 1000., 1200., {'A': 12.})
 
-    def test_invalid_or_missing_close_propagates_nan(self):
+    def test_invalid_or_missing_raw_close_propagates_nan(self):
         for frame in [pd.DataFrame({'other': [11.]}, index=[self.time]),
-                      pd.DataFrame({'close': ['invalid']}, index=[self.time]),
-                      pd.DataFrame({'close': [float('nan')]}, index=[self.time])]:
+                      pd.DataFrame({'raw_close': ['invalid'], 'close': ['invalid']}, index=[self.time]),
+                      pd.DataFrame({'raw_close': [float('nan')], 'close': [float('nan')]}, index=[self.time])]:
             with self.subTest(frame=frame):
                 marks = {'A': 10.}
                 equity, next_close = self.settle({'A': frame}, {'A': position(100)}, marks,
@@ -150,10 +150,10 @@ class AccountingCoreTest(unittest.TestCase):
 
         timestamp = pd.Timestamp('2026-01-06')
         market = {
-            'A': pd.DataFrame({'close': [11.]}, index=[timestamp]),
-            'NEW': pd.DataFrame({'close': [15.]}, index=[timestamp]),
+            'A': pd.DataFrame({'raw_close': [11.], 'close': [11.]}, index=[timestamp]),
+            'NEW': pd.DataFrame({'raw_close': [15.], 'close': [15.]}, index=[timestamp]),
             'SUSPENDED': pd.DataFrame(
-                {'close': [21.]}, index=[timestamp + pd.Timedelta(days=1)]),
+                {'raw_close': [21.], 'close': [21.]}, index=[timestamp + pd.Timedelta(days=1)]),
         }
         positions = {symbol: position(quantity)
                      for symbol, quantity in [('A', 100), ('NEW', 100), ('SUSPENDED', 10)]}
@@ -195,7 +195,7 @@ class BacktestAccountingTest(unittest.TestCase):
         dates = pd.date_range('2026-01-05', periods=6)
         prices = [10., 11., 13., 14., 12., 11.]
         market = {'A': pd.DataFrame({
-            'close': prices, 'high': [x + 1 for x in prices],
+            'raw_close': prices, 'close': prices, 'high': [x + 1 for x in prices],
             'low': [x - 1 for x in prices],
         }, index=dates)}
         params = dict(

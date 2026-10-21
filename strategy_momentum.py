@@ -31,7 +31,7 @@ def check_correlation_constraint(sym, pos_dict: dict[str, Position], corr_matrix
 def preprocess(df_all: dict, atr_window, extreme_window, avg_window):
     """
     返回包含指标的独立行情字典，不修改输入字典或 DataFrame。
-    df_all: 多品种数据字典
+    df_all: 多品种数据字典，后复权 OHLC 用于指标，raw_close 原始价列原样保留
     atr_window: ATR 指标计算窗口
     extreme_window: 历史极值数据计算窗口
     avg_window: 均值数据计算窗口
@@ -61,7 +61,7 @@ def select_retained_positions(df_all: dict, pos: dict[str, Position], time) -> d
     """
     返回继续持有的新仓位字典，允许共享不可变记录，不修改输入。
     df_all: 多品种字典
-    pos: Position 仓位字典，take 必须为数值止盈价
+    pos: Position 仓位字典，sig_take 必须为数值的复权止盈价
     time: 当前时刻
     """
     reserve_pos = {}
@@ -77,7 +77,7 @@ def select_retained_positions(df_all: dict, pos: dict[str, Position], time) -> d
         p = pos[sym]
 
         # 止损或者止盈
-        if c <= p.stop or c >= p.take:
+        if c <= p.sig_stop or c >= p.sig_take:
             continue
         else: # 保留仓位
             reserve_pos[sym] = pos[sym]
@@ -86,12 +86,18 @@ def select_retained_positions(df_all: dict, pos: dict[str, Position], time) -> d
 
 
 def calc_buy_signals(df_all: dict, pos: dict[str, Position], corr_matrix, time, corr_threshold):
-    """
-    更新开仓信号
-    df_all: 多品种字典
-    pos: 只读的 Position 仓位字典
-    corr_matrix: 品种相关矩阵
-    time: 当前时刻
+    """按后复权行情选择开仓信号，并携带同一时刻的原始价格。
+
+    Args:
+        df_all: 多标的行情字典，包含 close、raw_close、atr、ma 和 sig_long。
+        pos: 当前 Position 仓位字典，用于排除已持有标的；输入只读。
+        corr_matrix: 标的相关矩阵。
+        time: 信号时刻。
+        corr_threshold: 新标的与已有持仓相关性的阈值。
+
+    Returns:
+        list[tuple]，每项为标的、方向、强度、复权入场价、复权 ATR、原始收盘价。
+        信号强度仅使用复权价格和 ATR，行情及持仓输入不变。
     """
     valid_signals = []
     for sym, df in df_all.items():
@@ -125,23 +131,28 @@ def calc_buy_signals(df_all: dict, pos: dict[str, Position], corr_matrix, time, 
             strength = (px - ma) / a  
             side = 1
 
-        valid_signals.append((sym, side, strength, px, a))
+        raw_close = getv(df, time, "raw_close")
+        valid_signals.append((sym, side, strength, px, a, raw_close))
 
     return valid_signals
 
 
 def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_risk_per_trade) -> tuple[dict[str, Position], dict[str, float]]:
-    """
-    按信号强度排序，只选择最强的几个信号
-    signals: 信号（只读，按强度排序后计算新持仓）
-    time: 当前时刻
-    equity: 当前市值
-    num_candidate: 候选品种数目
-    atr_stop: 止损 atr 倍数
-    atr_take: 止盈 atr 倍数
-    max_risk_per_trade: 每笔交易的最大允许损失
+    """按信号强度排序并构造带两种价格的新持仓。
 
-    返回 (positions, prev_close)：新 Position 持仓字典及每股买入价基准字典。
+    Args:
+        signals: 六元素信号元组列表，依次为标的、方向、强度、复权入场价、
+            复权 ATR 和同一时刻原始收盘价；输入只读。
+        time: 入场时刻。
+        equity: 当前账户权益。
+        num_candidate: 最多选择的候选品种数。
+        atr_stop: 复权止损距离的 ATR 倍数。
+        atr_take: 复权止盈距离的 ATR 倍数。
+        max_risk_per_trade: 单笔允许损失占权益的比例。
+
+    Returns:
+        tuple[dict[str, Position], dict[str, float]]，即新持仓和原始买入价基准。
+        非正数量不开仓；两种入场价格对应 time，输入信号顺序保持不变。
     """
     # 
     sorted_signals = sorted(signals, key=lambda x: x[2], reverse=True)
@@ -149,7 +160,7 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
     pos: dict[str, Position] = {}
     prev_close = {}
 
-    for i, (sym, side, strength, px, a) in enumerate(sorted_signals):
+    for i, (sym, side, strength, px, a, raw_close) in enumerate(sorted_signals):
         if i >= num_candidate:
             break
 
@@ -157,15 +168,15 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
         take = px + atr_take * a
 
         # 计算仓位
-        qty_abs = calc_position_size(equity, a, px, atr_stop, max_risk_per_trade)
+        qty_abs = calc_position_size(equity, a, px, raw_close, atr_stop, max_risk_per_trade)
         
         if qty_abs <= 0:
             continue
 
         pos[sym] = Position(
-            side=side, entry=px, entry_time=time, stop=stop, take=take,
-            atr=a, qty=qty_abs * side)
-        prev_close[sym] = px
+            side=side, sig_entry=px, trade_entry_time=time, sig_stop=stop, sig_take=take,
+            sig_atr=a, trade_qty=qty_abs * side, trade_raw_close=raw_close)
+        prev_close[sym] = raw_close
 
     return pos, prev_close
 
@@ -173,7 +184,7 @@ def calc_buy_pos(signals, time, equity, num_candidate, atr_stop, atr_take, max_r
 def backtest(df_all: dict, params: dict, start_date=None):
     """
     返回持仓、权益及交易表，不修改调用方的行情字典、DataFrame 或参数。
-    df_all: 多品种数据字典
+    df_all: 多品种行情字典，包含后复权 OHLC 和用于交易、记账的 raw_close
     params: 参数
     start_date: 起始日期
     """
@@ -211,7 +222,7 @@ def backtest(df_all: dict, params: dict, start_date=None):
         pos = calc_stop_positions(df_all, pos, t, params["atr_drawdown"])
 
         for sym, p in pos.items():
-            print("{} close: {:.3f} stop: {:.3f}, take: {:.3f}".format(sym, p.entry, p.stop, p.take))
+            print("{} close: {:.3f} stop: {:.3f}, take: {:.3f}".format(sym, p.sig_entry, p.sig_stop, p.sig_take))
 
         # 更新保留仓位, 卖出部分仓位
         reserve_pos = select_retained_positions(df_all, pos, t)

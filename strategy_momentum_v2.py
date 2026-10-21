@@ -26,7 +26,7 @@ def preprocess(
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 high、low、
-            close 数值列；输入字典及 DataFrame 只读。
+            close 数值列，并保留交易所需的 raw_close 列；输入字典及 DataFrame 只读。
         atr_window: ATR 滚动均值的行数窗口。
         short_window: 短周期动量收益率的间隔行数。
         long_window: 长周期动量收益率的间隔行数。
@@ -92,7 +92,7 @@ def select_retained_positions(
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 列。
-        positions: 当前 Position 持仓字典，使用 stop，不使用 take。
+        positions: 当前 Position 持仓字典，使用 sig_stop，不使用 sig_take。
         ranked_factors: pandas.Series，按因子降序排列，索引为唯一标的代码；
             所有当日可交易的当前持仓必须出现在索引中。
         timestamp: 与行情索引兼容的筛选时刻。
@@ -120,7 +120,7 @@ def select_retained_positions(
 
         rank_index = ranked_factors.index.get_indexer([sym])[0]
         # 如果没有达到止损线 或者 排序仍然靠前
-        if c > p.stop and rank_index < retention_rank_limit:
+        if c > p.sig_stop and rank_index < retention_rank_limit:
             reserve_pos[sym] = positions[sym]
 
     return reserve_pos
@@ -139,8 +139,8 @@ def calc_buy_pos(
     """扫描排名靠前的候选标的并计算新开仓记录。
 
     Args:
-        market_data: 按标的代码组织的行情 DataFrame 字典，包含 close 和
-            atr 列；扫描标的应具有当日有效行情。
+        market_data: 按标的代码组织的行情 DataFrame 字典，包含后复权 close、
+            atr 和原始 raw_close 列；扫描标的应具有当日有效行情。
         held_positions: 已持有标的的 Position 仓位字典，用于跳过已有持仓。
         ranked_factors: 按因子降序排列, 索引为标的代码。
         timestamp: 与行情索引兼容的开仓时刻。
@@ -151,7 +151,7 @@ def calc_buy_pos(
 
     Returns:
         tuple[dict[str, Position], dict[str, float]]，即 (positions, prev_close)，
-        分别为新开仓记录和对应每股买入价基准，记录的 take 为 None。
+        分别为新开仓记录和对应原始买入价基准，记录的 sig_take 为 None。
         遇到负因子立即停止扫描，已有持仓跳过；
         不过滤计算所得的零股数记录。所有输入只读。
     """
@@ -176,15 +176,18 @@ def calc_buy_pos(
 
         price = getv(df, timestamp, "close")
         atr = getv(df, timestamp, "atr")
+        raw_close = getv(df, timestamp, "raw_close")
 
         stop = price - stop_atr_multiple * atr
 
         # 计算仓位
-        qty = calc_position_size(equity, atr, price, stop_atr_multiple, max_trade_risk_ratio)
+        qty = calc_position_size(
+            equity, atr, price, raw_close, stop_atr_multiple, max_trade_risk_ratio)
 
         pos[sym] = Position(
-            entry=price, entry_time=timestamp, stop=stop, atr=atr, qty=qty, side=1)
-        prev_close[sym] = price
+            sig_entry=price, trade_entry_time=timestamp, sig_stop=stop, sig_atr=atr,
+            trade_qty=qty, side=1, trade_raw_close=raw_close)
+        prev_close[sym] = raw_close
 
     return pos, prev_close
 
@@ -201,9 +204,9 @@ def calc_daily_positions(
     """计算当日止损、持仓筛选及条件开仓和调仓后的新状态。
 
     Args:
-        market_data: 已预处理的行情字典，包含 close、atr 和 factor 列。
+        market_data: 已预处理的行情字典，包含复权 close、atr、factor 和原始 raw_close 列。
         positions: 已完成当日估值、尚未处理当日止损的 Position 持仓字典。
-        close_marks: 已完成当日估值的完整价格基准，包含停牌及残留标的键。
+        close_marks: 已完成当日估值的完整原始价基准，包含停牌及残留标的键。
         timestamp: 与行情索引兼容的当日时刻。
         equity: 当日估值后的账户总权益，本函数不再计算权益。
         equity_history: 按时间排列且已包含当日权益的序列，用于杠杆计算。
@@ -211,9 +214,9 @@ def calc_daily_positions(
 
     Returns:
         tuple[dict[str, Position], dict[str, float], list[Trade]]，依次为新持仓、
-        完整新价格基准和当日交易列表。两个映射均独立于输入，允许共享不可变
-        Position；退出记录先于调仓记录。仅有剩余持仓名额时开仓和调仓，
-        即使未实际买入也执行该分支；新基准保留全部旧键并合入买入价。
+        完整新价格基准和当日交易列表。两个映射均独立于输入，允许共享不可变 Position;
+        退出记录先于调仓记录。仅有剩余持仓名额时开仓和调仓，
+        即使未实际买入也执行该分支; 新基准保留全部旧键并合入原始买入价。
     """
     # step 1: 根据最新收盘价更新止损价格
     stopped_positions = calc_stop_positions(market_data, positions, timestamp, params["atr_stop"])
@@ -238,18 +241,24 @@ def calc_daily_positions(
     new_positions, entry_close_marks = calc_buy_pos(
         market_data, retained_positions, ranked_factors, timestamp, equity, available_slots,
         params["atr_stop"], params["max_risk_per_trade"])
-    # 更新候选标, 并将其收盘价纳入 close_marks, 方便后续计算盯市收益
+    # 更新候选标，并将其原始收盘价纳入 close_marks，供后续盯市使用
     candidate_positions = {**retained_positions, **new_positions}
     next_close_marks.update(entry_close_marks)
 
-    # step 8: 计算杠杆率, ETF 没有杠杆的说法，其实是持有现金的比率
+    # step 8: 计算杠杆率, 由于 ETF 没有杠杆的说法，杠杆率最大值只能为 1
     leverage = calc_leverage_by_vol(
         equity_history, params["window_vol"], params["annual_factor"], params["target_vol"],
         params["min_lev"], params["max_lev"])
     allocation_budget = equity * leverage
+
+    # step 9: 根据杠杆率对标的仓位重新分配
     rebalanced_positions = rebalance_portfolio(
         market_data, candidate_positions, timestamp, allocation_budget, params["pos_change_threshold"])
-    rebalanced_positions = preserve_entries_for_unchanged_quantities(rebalanced_positions, candidate_positions)
+
+    # step 10: 合并未变更的标的
+    rebalanced_positions = preserve_entries_for_unchanged_quantities(
+        rebalanced_positions, candidate_positions)
+    # step 11:
     daily_trades.extend(calc_trade_records(
         market_data, timestamp, rebalanced_positions, candidate_positions))
     return rebalanced_positions, next_close_marks, daily_trades
@@ -282,11 +291,11 @@ def build_backtest_results(
 def backtest(market_data: dict, params: dict, start_date=None):
     """执行动量策略回测并返回持仓、权益曲线和交易表。
 
-    负责预处理、逐日估值和结果收集；每日持仓决策和结果表转换由私有函数处理。
+    负责预处理、逐日估值和结果收集；每日持仓决策和结果表转换由辅助函数处理。
 
     Args:
         market_data: 按标的代码组织的行情 DataFrame 字典，包含 high、low、
-            close 列，索引为日期；输入字典及 DataFrame 只读。
+            close 复权价格和 raw_close 原始价格列，索引为日期；输入只读。
         params: 只读配置字典，必需键为 init_equity、window_atr、window_short、
             window_long、window_vol、atr_stop、top_num_reserve、hold_max_num、
             max_risk_per_trade、annual_factor、target_vol、min_lev、max_lev 和
@@ -297,7 +306,7 @@ def backtest(market_data: dict, params: dict, start_date=None):
     Returns:
         tuple[pandas.DataFrame, pandas.DataFrame, pandas.DataFrame]，依次为：
             portfolio: 以 datetime 为索引，列为 symbol、quantity、value，
-                每日包含各标的及 cash 行。
+                每日包含各标的及 cash 行，数量为实际股数，市值按原始价计算。
             curve: 以 datetime 为索引，equity 列为每日总权益。
             trades: 默认整数索引，列为 symbol、side、entry_time、exit_time、
                 pnl、exit_reason，记录退出和切换仓位的交易。
@@ -306,7 +315,7 @@ def backtest(market_data: dict, params: dict, start_date=None):
     equity = float(params["init_equity"])
     positions: dict[str, Position] = {}
 
-    # 盯市基准：各标的最近一次可用收盘价，供下一轮估值使用
+    # 盯市基准：各标的最近一次可用原始收盘价，供下一轮估值使用
     close_marks = {}
 
     # 累计交易与已估值权益；权益历史供波动率杠杆计算

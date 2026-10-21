@@ -28,18 +28,18 @@ class TradeRecordsTest(unittest.TestCase):
 
     def position(self, **changes):
         position = {
-            "entry": 10.0,
-            "entry_time": self.entry_time,
-            "stop": 9.0,
-            "atr": 0.5,
-            "qty": 100,
+            'trade_raw_close': 10.0, 'sig_entry': 10.0,
+            'trade_entry_time': self.entry_time,
+            'sig_stop': 9.0,
+            'sig_atr': 0.5,
+            'trade_qty': 100,
             "side": 1,
         }
         position.update(changes)
         return Position(**position)
 
     def market(self, price):
-        return {"ETF_A": pd.DataFrame({"close": [price]}, index=[self.exit_time])}
+        return {"ETF_A": pd.DataFrame({'raw_close': [price], "close": [price]}, index=[self.exit_time])}
 
     def assert_trade(self, records, pnl, reason):
         expected = ("ETF_A", 1, self.entry_time, self.exit_time, pnl, reason)
@@ -68,19 +68,19 @@ class TradeRecordsTest(unittest.TestCase):
         for qty in [200, 50]:
             with self.subTest(qty=qty):
                 new_pos = {"ETF_A": self.position(
-                    qty=qty, entry=12.0, entry_time=self.exit_time,
+                    trade_qty=qty, trade_raw_close=12.0, sig_entry=12.0, trade_entry_time=self.exit_time,
                 )}
                 records = strategy.calc_trade_records(
                     self.market(12.0), self.exit_time, new_pos,
                     {"ETF_A": self.position()},
                 )
                 self.assert_trade(records, 200.0, "切换仓位")
-                self.assertEqual(new_pos["ETF_A"].qty, qty)
-                self.assertEqual(new_pos["ETF_A"].entry_time, self.exit_time)
+                self.assertEqual(new_pos["ETF_A"].trade_qty, qty)
+                self.assertEqual(new_pos["ETF_A"].trade_entry_time, self.exit_time)
 
     def test_same_day_and_zero_quantity_close_do_not_generate_trades(self):
-        for position in [self.position(entry_time=self.exit_time),
-                         self.position(qty=0)]:
+        for position in [self.position(trade_entry_time=self.exit_time),
+                         self.position(trade_qty=0)]:
             with self.subTest(position=position):
                 self.assertEqual(strategy.calc_trade_records(
                     self.market(12.0), self.exit_time, {}, {"ETF_A": position},
@@ -88,9 +88,9 @@ class TradeRecordsTest(unittest.TestCase):
 
     def test_same_entry_time_and_zero_old_quantity_rebalance_are_skipped(self):
         for old_position, new_position in [
-            (self.position(), self.position(qty=200)),
-            (self.position(qty=0), self.position(
-                qty=200, entry=12.0, entry_time=self.exit_time,
+            (self.position(), self.position(trade_qty=200)),
+            (self.position(trade_qty=0), self.position(
+                trade_qty=200, trade_raw_close=12.0, sig_entry=12.0, trade_entry_time=self.exit_time,
             )),
         ]:
             with self.subTest(old_position=old_position):
@@ -101,7 +101,7 @@ class TradeRecordsTest(unittest.TestCase):
 
     def test_unchanged_quantity_restores_original_entry_information(self):
         original = self.position()
-        new_pos = {"ETF_A": self.position(entry=12.0, entry_time=self.exit_time)}
+        new_pos = {"ETF_A": self.position(trade_raw_close=12.0, sig_entry=12.0, trade_entry_time=self.exit_time)}
         candidate = deepcopy(new_pos)
         normalized = strategy.preserve_entries_for_unchanged_quantities(new_pos, {"ETF_A": original})
         records = strategy.calc_trade_records(
@@ -116,8 +116,8 @@ class TradeRecordsTest(unittest.TestCase):
         original_market = deepcopy(market)
         old_pos = {"ETF_A": self.position()}
         original_old = deepcopy(old_pos)
-        for new_pos in [{}, {"ETF_A": self.position(entry=12.0, entry_time=self.exit_time)},
-                        {"ETF_A": self.position(qty=200, entry=12.0, entry_time=self.exit_time)}]:
+        for new_pos in [{}, {"ETF_A": self.position(trade_raw_close=12.0, sig_entry=12.0, trade_entry_time=self.exit_time)},
+                        {"ETF_A": self.position(trade_qty=200, trade_raw_close=12.0, sig_entry=12.0, trade_entry_time=self.exit_time)}]:
             with self.subTest(new_pos=new_pos):
                 original_new = deepcopy(new_pos)
                 first = strategy.calc_trade_records(market, self.exit_time, new_pos, old_pos)
