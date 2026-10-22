@@ -28,6 +28,7 @@ class LatestPositionsReadTest(unittest.TestCase):
         self.values = pd.DataFrame({
             'datetime': [date(2026, 10, 22), date(2026, 10, 23)],
             'cash': [38204.9, 999.],
+            'total_value': [239253.9, 888888.],
         })
 
     def write_workbook(self, quantities=None, values=None):
@@ -46,6 +47,7 @@ class LatestPositionsReadTest(unittest.TestCase):
             ('159650.SZ', 500), ('518880.SH', 0),
             ('512800.SH', 133400), ('159941.SZ', -100)))
         self.assertEqual(state.cash, 38204.9)
+        self.assertEqual(state.total_value, 239253.9)
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_date_only_quantities_are_a_valid_cash_only_state(self):
@@ -108,6 +110,24 @@ class LatestPositionsReadTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, '159650.SZ'):
                     report.read_latest_positions(self.path)
 
+    def test_missing_or_nonfinite_matching_total_value_is_rejected_without_output(self):
+        invalid_tables = [self.values.drop(columns='total_value')]
+        for amount in [None, float('inf'), 'bad total']:
+            values = self.values.astype(object)
+            values.loc[0, 'total_value'] = amount
+            invalid_tables.append(values)
+        for values in invalid_tables:
+            with self.subTest(values=values):
+                self.write_workbook(values=values)
+                with self.assertRaisesRegex(ValueError, 'total_value'):
+                    report.read_latest_positions(self.path)
+                client = FixedCalendar(pd.DataFrame({'cal_date': ['20261023'], 'is_open': [1]}))
+                code, stdout, stderr = self.run_command(['--workbook', str(self.path)], client)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(stdout, '')
+                self.assertIn('total_value', stderr)
+                self.assertEqual(client.requests, [])
+
     def test_invalid_and_unsuffixed_codes_are_rejected(self):
         for code in ['159650', '159650.SH', 'ETF_A', 'cash']:
             with self.subTest(code=code):
@@ -127,7 +147,9 @@ class LatestPositionsReadTest(unittest.TestCase):
         client = FixedCalendar(pd.DataFrame({'cal_date': ['20261023'], 'is_open': [1]}), noise='API log')
         code, stdout, stderr = self.run_command(['--workbook', str(self.path)], client)
         self.assertEqual((code, stderr), (0, ''))
-        self.assertEqual(stdout, '2026-10-23\n159650.SZ: 500\n512800.SH: 133400\ncash: 38204.90\n')
+        self.assertEqual(stdout, 'SIGNAL_DATE = dt.date(2026, 10, 22)\nTRADE_DATE = dt.date(2026, 10, 23)\n'
+                         'TARGET_QUANTITIES = {\n    "159650.SZ": 500,\n    "512800.SH": 133400,\n}\n'
+                         'TOTAL_VALUE = 239253.90\n现金: 38204.90\n总市值: 239253.90\n')
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_default_path_is_independent_of_current_directory(self):
@@ -141,7 +163,8 @@ class LatestPositionsReadTest(unittest.TestCase):
             with patch.object(report, 'DEFAULT_WORKBOOK', self.path):
                 code, stdout, stderr = self.run_command([], client)
             self.assertEqual((code, stderr), (0, ''))
-            self.assertTrue(stdout.startswith('2026-10-23\n'))
+            self.assertTrue(stdout.startswith('SIGNAL_DATE = dt.date(2026, 10, 22)\n'
+                                              'TRADE_DATE = dt.date(2026, 10, 23)\n'))
             # 显式相对路径从调用目录解析。
             self.assertEqual(self.run_command(['--workbook', 'results.xlsx'], client)[0], 0)
         finally:
@@ -174,17 +197,44 @@ class LatestPositionsFormatTest(unittest.TestCase):
     def test_exact_output_preserves_positive_position_order(self):
         state = report.LatestPositions(date(2026, 10, 22), (
             ('159650.SZ', 500), ('518880.SH', 0),
-            ('512800.SH', 133400), ('159941.SZ', -100)), 38204.9)
-        self.assertEqual(report.format_positions_report(state, date(2026, 10, 23)),
-                         '2026-10-23\n159650.SZ: 500\n512800.SH: 133400\ncash: 38204.90')
+            ('512800.SH', 133400), ('159941.SZ', -100)), 38204.9, 239253.9)
+        output = report.format_positions_report(state, date(2026, 10, 23))
+        self.assertEqual(output,
+                         'SIGNAL_DATE = dt.date(2026, 10, 22)\nTRADE_DATE = dt.date(2026, 10, 23)\n'
+                         'TARGET_QUANTITIES = {\n    "159650.SZ": 500,\n    "512800.SH": 133400,\n}\n'
+                         'TOTAL_VALUE = 239253.90\n现金: 38204.90\n总市值: 239253.90')
+        scope = {'dt': SimpleNamespace(date=date), '__builtins__': {}}
+        exec(output.split('\n现金:')[0], scope)
+        self.assertEqual(scope['SIGNAL_DATE'], state.source_date)
+        self.assertEqual(scope['TRADE_DATE'], date(2026, 10, 23))
+        self.assertEqual(scope['TARGET_QUANTITIES'], {'159650.SZ': 500, '512800.SH': 133400})
+        self.assertEqual(scope['TOTAL_VALUE'], 239253.9)
 
-    def test_cash_only_output_uses_half_up_not_float_rounding(self):
+    def test_empty_dictionary_and_money_use_half_up_not_float_rounding(self):
         for positions in [(), (('159650.SZ', 0), ('518880.SH', -100))]:
-            for cash, expected in [(1.005, '1.01'), (-1.005, '-1.01'), (0, '0.00')]:
+            for cash, total, expected_cash, expected_total in [
+                (1.005, 2.675, '1.01', '2.68'),
+                (-1.005, -2.675, '-1.01', '-2.68'),
+                (0, 2000., '0.00', '2000.00'),
+            ]:
                 with self.subTest(positions=positions, cash=cash):
-                    state = report.LatestPositions(date(2026, 10, 22), positions, cash)
+                    state = report.LatestPositions(date(2026, 10, 22), positions, cash, total)
                     self.assertEqual(report.format_positions_report(state, date(2026, 10, 23)),
-                                     f'2026-10-23\ncash: {expected}')
+                                     'SIGNAL_DATE = dt.date(2026, 10, 22)\n'
+                                     'TRADE_DATE = dt.date(2026, 10, 23)\nTARGET_QUANTITIES = {\n}\n'
+                                     f'TOTAL_VALUE = {expected_total}\n现金: {expected_cash}\n总市值: {expected_total}')
+
+    def test_source_date_and_next_date_have_unpadded_month_and_day(self):
+        for source, next_date, expected in [
+            (date(2026, 1, 8), date(2026, 1, 9),
+             'SIGNAL_DATE = dt.date(2026, 1, 8)\nTRADE_DATE = dt.date(2026, 1, 9)\n'),
+            (date(2026, 12, 31), date(2027, 1, 4),
+             'SIGNAL_DATE = dt.date(2026, 12, 31)\nTRADE_DATE = dt.date(2027, 1, 4)\n'),
+        ]:
+            with self.subTest(source=source):
+                state = report.LatestPositions(source, (), 0., 2000.)
+                self.assertEqual(report.format_positions_report(state, next_date), expected +
+                                 'TARGET_QUANTITIES = {\n}\nTOTAL_VALUE = 2000.00\n现金: 0.00\n总市值: 2000.00')
 
 
 class FixedCalendar:

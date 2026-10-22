@@ -26,11 +26,12 @@ class ReportError(ValueError):
 
 
 class LatestPositions(NamedTuple):
-    """最新源日期、有序目标仓位和同日现金，不修改来源工作簿。"""
+    """最新源日期、有序仓位及同日现金和总资产，不修改来源工作簿。"""
 
     source_date: date
     positions: tuple[tuple[str, int], ...]
     cash: float
+    total_value: float
 
 
 def _parse_dates(frame: pd.DataFrame, sheet: str) -> pd.Series:
@@ -88,16 +89,17 @@ def _finite_number(value, field: str) -> float:
 
 
 def read_latest_positions(workbook_path: str | Path) -> LatestPositions:
-    """只读工作簿，选取最大日期的目标仓位及同日现金。
+    """只读工作簿，选取最大日期的目标仓位及同日现金和总资产。
 
     Args:
         workbook_path: 含 portfolio_qty 和 portfolio_value 的 Excel 路径。
 
     Returns:
-        具名最新状态，保留标的列顺序以及零、负数量，不改写工作簿。
+        具名最新状态，保留标的列顺序以及零、负数量，总资产取包含现金的
+        total_value，不重新估算，不改写工作簿。
 
     Raises:
-        ReportError: 文件不可读、必要表列缺失、日期歧义、数量或现金不合法。
+        ReportError: 文件不可读、必要表列缺失、日期歧义、数量或金额不合法。
     """
     path = Path(workbook_path)
     try:
@@ -116,14 +118,16 @@ def read_latest_positions(workbook_path: str | Path) -> LatestPositions:
     value_dates = _parse_dates(values, 'portfolio_value')
     if quantities.empty:
         raise ReportError('portfolio_qty 没有仓位日期记录')
-    if 'cash' not in values:
-        raise ReportError('portfolio_value 缺少 cash 列')
+    for field in ('cash', 'total_value'):
+        if field not in values:
+            raise ReportError(f'portfolio_value 缺少 {field} 列')
     source_date = max(quantity_dates)
     row = quantities.loc[quantity_dates == source_date].iloc[0]
-    matching_cash = values.loc[value_dates == source_date, 'cash']
-    if len(matching_cash) != 1:
-        raise ReportError(f'portfolio_value 缺少 {source_date} 唯一对应的 cash')
-    cash = _finite_number(matching_cash.iloc[0], 'cash')
+    matching_values = values.loc[value_dates == source_date]
+    if len(matching_values) != 1:
+        raise ReportError(f'portfolio_value 缺少 {source_date} 唯一对应的 cash 和 total_value')
+    cash = _finite_number(matching_values.iloc[0]['cash'], 'cash')
+    total_value = _finite_number(matching_values.iloc[0]['total_value'], 'total_value')
     positions = []
     for symbol in quantities.columns:
         if symbol == 'datetime':
@@ -137,23 +141,35 @@ def read_latest_positions(workbook_path: str | Path) -> LatestPositions:
         if quantity % 100 != 0:
             raise ReportError(f'{symbol} 的数量必须为整数且为 100 的倍数')
         positions.append((symbol, int(quantity)))
-    return LatestPositions(source_date, tuple(positions), cash)
+    return LatestPositions(source_date, tuple(positions), cash, total_value)
 
 
 def format_positions_report(state: LatestPositions, next_trade_date: date) -> str:
-    """将已验证的最新状态格式化为可复制的仓位清单。
+    """将已验证的最新状态格式化为配置赋值片段及金额核对信息。
 
     Args:
-        state: 最新源日期、有序数量及同日现金，只读。
+        state: 最新源日期、有序数量及同日现金和总资产，只读。
         next_trade_date: 由交易日历确定的下一交易日。
 
     Returns:
-        日期首行、仅含正仓位的代码与整数行、两位小数现金末行组成的文本，
-        不附标题或末尾换行，不改变原始状态。
+        SIGNAL_DATE、TRADE_DATE、正仓位 TARGET_QUANTITIES 字典及 TOTAL_VALUE
+        赋值片段，随后附中文现金与总市值。两个总资产金额相同，金额按分显示；
+        年月日不补零，不附导入语句或末尾换行，不改变原始状态。
     """
-    lines = [next_trade_date.isoformat()]
-    lines.extend(f'{symbol}: {quantity}' for symbol, quantity in state.positions if quantity > 0)
-    lines.append(f'cash: {round_money(state.cash):.2f}')
+    source_date = state.source_date
+    lines = [
+        f'SIGNAL_DATE = dt.date({source_date.year}, {source_date.month}, {source_date.day})',
+        f'TRADE_DATE = dt.date({next_trade_date.year}, {next_trade_date.month}, {next_trade_date.day})',
+        'TARGET_QUANTITIES = {',
+    ]
+    lines.extend(f'    "{symbol}": {quantity},' for symbol, quantity in state.positions if quantity > 0)
+    total_value = f'{round_money(state.total_value):.2f}'
+    lines.extend([
+        '}',
+        f'TOTAL_VALUE = {total_value}',
+        f'现金: {round_money(state.cash):.2f}',
+        f'总市值: {total_value}',
+    ])
     return '\n'.join(lines)
 
 
