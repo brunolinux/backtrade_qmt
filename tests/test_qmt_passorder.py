@@ -446,8 +446,10 @@ class CallbackTest(StrategyTestCase):
 class ScriptCompatibilityTest(unittest.TestCase):
     def test_script_exists_and_import_has_no_trading_side_effects(self):
         self.assertTrue(SCRIPT.is_file(), "embedded strategy has not been created")
-        source = SCRIPT.read_bytes().decode("gbk")
-        self.assertIn("coding: gbk", source.splitlines()[0])
+        source_bytes = SCRIPT.read_bytes()
+        source = source_bytes.decode("gb2312")
+        self.assertEqual(source.encode("gb2312"), source_bytes)
+        self.assertIn("coding: gb2312", source.splitlines()[0])
         ast.parse(source, feature_version=(3, 6))
         strategy = load_strategy()
         strategy.get_trade_detail_data.assert_not_called()

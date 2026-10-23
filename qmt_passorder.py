@@ -1,4 +1,4 @@
-# coding: gbk
+# coding: gb2312
 """Submit fixed ETF target differences from the embedded QMT Python runtime."""
 
 import datetime as dt
@@ -24,14 +24,14 @@ STRATEGY_NAME = "ETF_TARGET"
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
 
-# totalï¿½ï¿½Êµï¿½Ê³Ö²Ö·ï¿½ï¿½ï¿½ï¿½ï¿½availableï¿½ï¿½ï¿½ï¿½ï¿½Ð¿ï¿½ï¿½ï¿½ï¿½Ä·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½T+1ï¿½ï¿½ï¿½ï¿½
+# total ÎªÊµ¼Ê³Ö²Ö·ÝÊý£»available Îªµ±Ç°¿ÉÂô·ÝÊý£¬¿ÉÄÜÊÜ T+1 ÏÞÖÆ¡£
 Holding = namedtuple("Holding", "total available")
 
-# balanceï¿½ï¿½ï¿½Ë»ï¿½ï¿½ï¿½ï¿½Ê²ï¿½ï¿½ï¿½availableï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½market_valueï¿½ï¿½ï¿½Ö²ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½
-# holdingsï¿½ï¿½ETF ï¿½ï¿½ï¿½ëµ½ Holding ï¿½ï¿½Ó³ï¿½ä£»ï¿½Öµä±¾ï¿½ï¿½ï¿½Ô¿ï¿½ï¿½Þ¸Ä¡ï¿½
+# balance ÎªÕË»§×Ü×Ê²ú£»available Îª¿ÉÓÃ×Ê½ð£»market_value Îª³Ö²ÖÊÐÖµ¡£
+# holdings ½«Ã¿¸ö ETF ´úÂëÓ³Éäµ½Î¨Ò»Ò»Ìõ Holding ¼ÇÂ¼¡£
 Snapshot = namedtuple("Snapshot", "balance available market_value holdings")
 
-# codeï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ºï¿½Ä´ï¿½ï¿½ë£»operationï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 23 / ï¿½ï¿½ï¿½ï¿½ 24ï¿½ï¿½quantityï¿½ï¿½Î¯ï¿½Ð·ï¿½ï¿½ï¿½ï¿½ï¿½
+# code Îª´ø½»Ò×Ëùºó×ºµÄ´úÂë£»operation ÎªÂòÈë 23 »òÂô³ö 24£»quantity ÎªÎ¯ÍÐ·ÝÊý¡£
 PlannedOrder = namedtuple("PlannedOrder", "code operation quantity")
 
 # QMT rewinds ContextInfo attributes between ticks. Keep trading state outside it.
@@ -92,7 +92,7 @@ def _validate_calendar(C):
 
 
 def _snapshot():
-    """Return a validated initial account snapshot with aggregated ETF holdings.
+    """Return a validated account snapshot with one holding per ETF code.
 
     Returns:
         Snapshot containing total assets, cash, market value and new holdings.

@@ -1,7 +1,7 @@
 # QMT 下单模型
 
 `qmt_passorder.py` 用于 QMT 内置 Python 策略，不是 MiniQMT 独立进程脚本。
-文件使用 GBK 编码。仅依赖 Python 标准库，交易接口由 QMT 注入。
+文件使用 GB2312 编码。仅依赖 Python 标准库，交易接口由 QMT 注入。
 
 使用前填写 `ACCOUNT_ID = "xxx"`。将脚本导入 QMT，选择实盘账户并于 09:35 前启动。
 本次开发只使用模拟接口验证，未连接账户或发送真实委托。
